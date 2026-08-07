@@ -1,0 +1,104 @@
+# DeepCell Types' 51-class vocabulary -> the 16 cHL benchmark classes.
+#
+# DeepCell Types is zero-shot: it predicts from a fixed pan-tissue vocabulary and
+# has never been told this dataset's label set. Scoring it therefore needs a
+# translation, and the translation is a judgement call that can quietly decide
+# the result — so it lives here, as a reviewable artifact, rather than inside
+# the inference script.
+#
+# THE RULE, applied uniformly: map each DeepCell Types class to the label a cHL
+# annotator *using this 18-marker panel* would have assigned to such a cell.
+# That is why the many tissue-specific classes (Hepatocyte, Podocyte, Neuron,
+# ...) map to `Other` rather than to null: this panel carries no marker that
+# would distinguish them, so the MAPS annotators would have binned them into
+# `Other` — the dataset's genuine catch-all class — exactly as DeepCell Types
+# predicting them here should be binned.
+#
+# `null` is reserved for the two cases where the rule cannot be applied because
+# DeepCell Types' vocabulary is COARSER than the benchmark's, so no single
+# answer is available:
+#
+#   Macrophage  The benchmark splits macrophages by polarisation (M1 vs M2,
+#               resolved by CD68 against CD163/CD206). DeepCell Types has one
+#               undivided `Macrophage` class, so it cannot express either. It
+#               is not wrong, it is unable to answer — mapping it to whichever
+#               of M1/M2 is more common in this slide would be fitting the
+#               mapping to the test set.
+#   Tcell       Generic, where the benchmark wants CD4 / CD8 / TReg. DeepCell
+#               Types also has the specific classes and uses them, so a generic
+#               `Tcell` call is a genuine refusal to commit.
+#
+# `null` scores as an error (see `probe.score_predictions`), which is the right
+# default — the benchmark asked a question and got no usable answer — but it
+# means part of DeepCell Types' zero-shot score is a vocabulary-granularity
+# artifact rather than a perception failure. `evaluate.py --collapse` re-runs
+# every model on a label space with M1+M2 merged into `Macrophage` to show how
+# much of the gap that accounts for.
+#
+# `Unknown` is DeepCell Types' own abstention / dropped-cell sentinel.
+
+dct_to_chl:
+  # --- direct, unambiguous correspondences ---
+  Bcell: B
+  CD4T: CD4
+  CD8T: CD8
+  Treg: TReg
+  NK: NK
+  Dendritic: DC
+  Monocyte: Monocyte
+  Mast: Mast
+  Neutrophil: Neutrophil
+  Tumor: Tumor
+  Epithelial: Epithelial
+
+  # --- endothelium: the benchmark splits blood vs lymphatic (CD31 vs
+  #     podoplanin); every blood-endothelial subtype collapses to Endothelial ---
+  Endothelial: Endothelial
+  BloodVesselEndothelial: Endothelial
+  HSEC: Endothelial            # hepatic sinusoidal endothelium
+  LittoralCell: Endothelial    # splenic sinus lining, endothelial-like
+  LymphaticEndothelial: Lymphatic
+
+  # --- other epithelium: cytokeratin-positive, so `Epithelial` under this panel ---
+  Enterocyte: Epithelial
+  Goblet: Epithelial
+  Paneth: Epithelial
+  Foveolar: Epithelial
+  Club: Epithelial
+  CollectingDuct: Epithelial
+  EVT: Epithelial
+
+  # --- Langerhans cells are a dendritic-cell subset (CD11c+) ---
+  Langerhans: DC
+
+  # --- no panel marker distinguishes these from the catch-all class ---
+  AlphaCell: Other
+  Astrocyte: Other
+  Basophil: Other
+  BetaCell: Other
+  Endocrine: Other
+  Eosinophil: Other
+  Erythrocyte: Other
+  Fibroblast: Other
+  Glial: Other
+  Hepatocyte: Other
+  ICC: Other
+  Keratocyte: Other
+  Melanocyte: Other
+  Mesangial: Other
+  Microglial: Other
+  NKT: Other
+  Neuron: Other
+  Pericyte: Other
+  Photoreceptor: Other
+  Plasma: Other                # CD20-negative, so annotated `Other` on this panel
+  Podocyte: Other
+  SmoothMuscle: Other
+  Stellate: Other
+  Stromal: Other
+  Telocyte: Other
+
+  # --- vocabulary too coarse to answer; see the header ---
+  Macrophage: null
+  Tcell: null
+  Unknown: null

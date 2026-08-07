@@ -1,0 +1,33 @@
+# Secrets — never commit. See env/secrets.env.example.
+env/secrets.env
+
+# Upstream clones, not this project's code. They carry their own .git, so
+# tracking them here would either vendor thousands of files or create gitlinks
+# pointing at commits this repo does not control. Clone them yourself:
+#   git clone https://github.com/mahmoodlab/CORAL.git
+#   git clone https://github.com/vanvalenlab/deepcell-types.git
+#   git clone https://github.com/ploughhh/Spatium.git
+CORAL/
+deepcell-types/
+Spatium/
+
+# The 3.4 GB Zenodo download and everything derived from it (~14 GB unpacked).
+CORAL/tutorials/example-data/
+data/
+work/
+
+# Large run artifacts (~1.1 GB). The findings live in results/*.csv and
+# results/figures/, which ARE tracked — these are the regenerable inputs.
+results/features/
+results/probe_cache/
+results/spatium/
+results/logs/
+results/predictions/*.npz
+results/cells.parquet
+
+# Build logs (the build scripts themselves are tracked).
+env/*.log
+
+# Python
+__pycache__/
+*.pyc
