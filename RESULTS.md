@@ -9,6 +9,12 @@ A **mean-marker** readout — the average intensity of each panel marker over th
 cell's own pixels — is scored alongside as the control. It is the thing a
 conventional pipeline already does, with no model and no GPU.
 
+> **VirTues is in the harness but not in these numbers.** It was added after this
+> run ([src/run_virtues.py](src/run_virtues.py)) and has not been scored yet, so
+> every table below is the original three plus the control. `./run_all.sh virtues`
+> then `./run_all.sh evaluate` fills in the fourth row — the probe cache means
+> only VirTues gets re-probed.
+
 ---
 
 ## Headline

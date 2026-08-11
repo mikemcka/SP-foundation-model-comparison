@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end driver: raw data -> canonical cells -> three encoders -> report.
+# End-to-end driver: raw data -> canonical cells -> four encoders -> report.
 #
-# Each stage runs in its own conda env because the three models pin
-# incompatible torch stacks (KRONOS2 needs exactly torch 2.6.0+cu124; DeepCell
-# Types resolves to cu13; Spatium wants pytorch-lightning on top of 2.6). Stages
-# hand off through files under results/, never through a live process, so any
-# one of them can be re-run alone.
+# Each stage runs in its own conda env because the four models pin incompatible
+# torch stacks (KRONOS2 needs exactly torch 2.6.0+cu124; DeepCell Types resolves
+# to cu13; Spatium wants pytorch-lightning on top of 2.6; VirTues needs cu126 +
+# flash-attn). Stages hand off through files under results/, never through a
+# live process, so any one of them can be re-run alone.
 #
 # GPU stages run on Slurm. Set GPU_JOBID to attach to an existing interactive
 # allocation (`srun --jobid=...`); leave it unset to submit each stage with
@@ -14,7 +14,7 @@
 #   source env/secrets.env
 #   GPU_JOBID=29122168 ./run_all.sh
 #
-# Individual stages: ./run_all.sh prep | kronos2 | dct | spatium | evaluate
+# Individual stages: ./run_all.sh prep | kronos2 | dct | spatium | virtues | evaluate
 set -euo pipefail
 
 REPO=/vast/scratch/users/mckay.m/SP-foundation-model-comparison
@@ -79,10 +79,20 @@ stage_dct()      { on_gpu  sp-dct    "$(py sp-dct) src/run_dct.py"      2>&1 | t
 stage_spatium()  { on_gpu  sp-spatium "$(py sp-spatium) src/run_spatium.py" 2>&1 | tee "$LOGS/spatium.log"; }
 stage_evaluate() { on_cpu  sp-coral  "$(py sp-coral) src/evaluate.py"      2>&1 | tee "$LOGS/evaluate.log"; }
 
-# The three GPU stages are independent — each reads prep's outputs and writes
-# its own feature file — so fire them as separate jobs rather than queueing them
-# behind each other. KRONOS2 is the long pole (a ViT-B forward per cell), so it
-# gets the longer wall-clock request.
+# VirTues splits in two: its marker embeddings are 17 ESM-2 forward passes but
+# need internet (UniProt + the ESM weights), and GPU nodes here have none. So
+# the marker stage runs locally first and the GPU stage reads its output.
+stage_virtues() {
+    in_env sp-virtues src/run_virtues.py --stage markers 2>&1 | tee "$LOGS/virtues-markers.log"
+    on_gpu sp-virtues "$(py sp-virtues) src/run_virtues.py --stage tokens" \
+        2>&1 | tee "$LOGS/virtues.log"
+}
+
+# The four GPU stages are independent — each reads prep's outputs and writes its
+# own feature file — so fire them as separate jobs rather than queueing them
+# behind each other. KRONOS2 (a ViT-B forward per cell) and VirTues (a sliding
+# window over the whole slide) are the long poles, so they get the longer
+# wall-clock requests.
 stage_gpu_parallel() {
     local common=(--partition=gpuq --gres=gpu:1 --cpus-per-task=8 --mem=120G
                   --output="$LOGS/%x-%j.out" --export=ALL)
@@ -91,9 +101,13 @@ stage_gpu_parallel() {
         sbatch "${common[@]}" --job-name="$name" --time="$time_limit" \
             --chdir="$REPO" --wrap="$(py "$env_name") $script"
     }
+    # VirTues' marker embeddings must exist before its GPU job starts; the stage
+    # is idempotent, so running it here costs nothing on a re-submit.
+    in_env sp-virtues src/run_virtues.py --stage markers 2>&1 | tee "$LOGS/virtues-markers.log"
     submit sp-kronos2 sp-coral   8:00:00 src/run_kronos2.py
     submit sp-dct     sp-dct     4:00:00 src/run_dct.py
     submit sp-spatium sp-spatium 4:00:00 src/run_spatium.py
+    submit sp-virtues sp-virtues 8:00:00 "src/run_virtues.py --stage tokens"
     squeue -u "$USER" -o "%.10i %.12j %.2t %.11M %R"
 }
 
@@ -103,17 +117,19 @@ case "${1:-all}" in
     kronos2)  stage_kronos2 ;;
     dct)      stage_dct ;;
     spatium)  stage_spatium ;;
+    virtues)  stage_virtues ;;
     evaluate) stage_evaluate ;;
     all)
         stage_prep
         stage_kronos2
         stage_dct
         stage_spatium
+        stage_virtues
         stage_evaluate
         ;;
     *)
-        echo "usage: $0 [all|prep|gpu|kronos2|dct|spatium|evaluate]" >&2
-        echo "  gpu = submit all three model stages as parallel Slurm jobs" >&2
+        echo "usage: $0 [all|prep|gpu|kronos2|dct|spatium|virtues|evaluate]" >&2
+        echo "  gpu = submit all four model stages as parallel Slurm jobs" >&2
         exit 2
         ;;
 esac

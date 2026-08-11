@@ -29,6 +29,7 @@ REPO = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO / "CORAL" / "tutorials" / "example-data"
 CHL_DIR = DATA_DIR / "cHL_CODEX"
 STORE = DATA_DIR / "processed" / "raw_image.zarr"
+MASK_TIFF = CHL_DIR / "segmentation" / "raw_image.tiff"
 RESULTS = REPO / "results"
 
 # --- Acquisition constants -------------------------------------------------
@@ -156,6 +157,76 @@ def load_cells() -> pd.DataFrame:
             "Run src/prep_coral.py (env: sp-coral) first."
         )
     return pd.read_parquet(CELLS_PARQUET)
+
+
+def open_slide() -> "object":
+    """Open the ingested CORAL slide every pixel-reading model works from."""
+    from coral import CoralSlide
+
+    return CoralSlide.open(STORE)
+
+
+def panel_indices(slide: "object", markers: list[str] | None = None) -> list[int]:
+    """Resolve panel marker names to plane indices in the ingested slide.
+
+    The one definition of *which planes are the panel*. Every model that reads
+    pixels outside CORAL's own patch pipeline goes through this, so a model
+    cannot silently end up on a different channel set — which is precisely how a
+    panel drifts between models.
+
+    Args:
+        slide: An open :class:`coral.CoralSlide`.
+        markers: Marker names to resolve. Defaults to the full :data:`PANEL`.
+
+    Returns:
+        Plane indices into ``slide.image``, positionally aligned to ``markers``.
+
+    Raises:
+        ValueError: If any requested marker is absent from the slide.
+    """
+    markers = list(PANEL if markers is None else markers)
+    available = list(slide.markers)
+    missing = [m for m in markers if m not in available]
+    if missing:
+        raise ValueError(f"panel markers absent from the slide: {missing}")
+    return [available.index(m) for m in markers]
+
+
+def load_mask() -> np.ndarray:
+    """Load the published cell mask in level-0 pixel space.
+
+    Read from the original TIFF rather than re-derived: CORAL's custom-mask
+    import preserves cell ids, so these ids join directly onto the canonical
+    cell table.
+    """
+    import tifffile
+
+    return tifffile.imread(MASK_TIFF)
+
+
+def load_panel_stack(
+    markers: list[str] | None = None,
+) -> tuple[np.ndarray, list[str], np.ndarray]:
+    """Load the panel channels and the cell mask in level-0 pixel space.
+
+    Channels come from the ingested CORAL slide rather than the raw TIFFs, so
+    every model reads exactly the planes KRONOS2 read, in the same order.
+
+    Args:
+        markers: Marker names to load. Defaults to the full :data:`PANEL`.
+
+    Returns:
+        ``(raw, marker_names, mask)`` — ``raw`` is ``(C, H, W)`` float32,
+        ``marker_names`` are CORAL's canonical names, ``mask`` is a 2D label
+        image.
+    """
+    markers = list(PANEL if markers is None else markers)
+    slide = open_slide()
+    raw = np.asarray(slide.image[panel_indices(slide, markers)].values, dtype=np.float32)
+    mask = load_mask()
+    print(f"raw {raw.shape} {raw.dtype} | mask {mask.shape} "
+          f"({len(np.unique(mask)) - 1:,} cells)")
+    return raw, markers, mask
 
 
 def align_features(cells: pd.DataFrame, feature_path: Path) -> np.ndarray:

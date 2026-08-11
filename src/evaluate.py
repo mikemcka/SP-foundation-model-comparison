@@ -37,16 +37,19 @@ from common import probe, protocol  # noqa: E402
 
 FIGURES = protocol.RESULTS / "figures"
 
-# Categorical slots 1-3 of the validated default palette for the three
+# Categorical slots 1-4 of the validated default palette for the four
 # foundation models; the mean-marker baseline takes neutral ink because it is a
-# reference line, not a fourth competitor. Validated all-pairs, light mode:
+# reference line, not a fifth competitor. Validated all-pairs, light mode:
 # worst CVD dE 9.2, worst normal-vision dE 24.0. Aqua sits below 3:1 on the
 # light surface, so every chart using it ships value labels or a companion
-# table (the relief rule).
+# table (the relief rule). Slot 4 (magenta) was re-checked against the other
+# four under deuteran/protan/tritan simulation before being added; its closest
+# pair is DeepCell Types.
 COLORS = {
     "KRONOS2": "#2a78d6",
     "DeepCell Types": "#eb6834",
     "Spatium": "#1baf7a",
+    "VirTues": "#c0468f",
     "mean-marker": "#6b6a66",
 }
 METRICS = ["F1-Score", "Balanced Accuracy", "Average Precision", "ROC AUC"]
@@ -57,6 +60,7 @@ ENCODERS = {
     "KRONOS2": "kronos2.npz",
     "DeepCell Types": "deepcell_types.npz",
     "Spatium": "spatium.npz",
+    "VirTues": "virtues.npz",
 }
 
 # The collapse applied by `--collapse`: DeepCell Types has a single, undivided

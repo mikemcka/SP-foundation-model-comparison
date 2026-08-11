@@ -36,15 +36,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import tifffile
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import protocol  # noqa: E402
 
-JOB_DIR = protocol.DATA_DIR / "processed"
-MASK_TIFF = protocol.CHL_DIR / "segmentation" / "raw_image.tiff"
 CLASS_MAP_YAML = Path(__file__).resolve().parent / "common" / "dct_class_map.yaml"
 
 # Marker aliases DeepCell Types' own resolver does not cover. Both are genuine
@@ -76,35 +73,6 @@ def check_credentials() -> None:
             "DEEPCELL_ACCESS_TOKEN is not set; the checkpoint download is gated "
             "behind users.deepcell.org. Run: source env/secrets.env"
         )
-
-
-def load_panel_stack() -> tuple[np.ndarray, list[str], np.ndarray]:
-    """Load the 18-marker panel and the cell mask in level-0 pixel space.
-
-    Channels come from the ingested CORAL slide rather than the raw TIFFs so
-    that DeepCell Types reads exactly the planes KRONOS2 read, in the same
-    order. The mask is read from the published TIFF: CORAL's custom-mask import
-    preserves cell ids, so the ids line up with the canonical cell table.
-
-    Returns:
-        ``(raw, marker_names, mask)`` — ``raw`` is ``(C, H, W)`` float32,
-        ``marker_names`` are CORAL's canonical names, ``mask`` is a 2D label
-        image.
-    """
-    from coral import CoralSlide
-
-    slide = CoralSlide.open(JOB_DIR / "raw_image.zarr")
-    available = list(slide.markers)
-    missing = [m for m in protocol.PANEL if m not in available]
-    if missing:
-        raise ValueError(f"panel markers absent from the slide: {missing}")
-
-    idx = [available.index(m) for m in protocol.PANEL]
-    raw = np.asarray(slide.image[idx].values, dtype=np.float32)
-    mask = tifffile.imread(MASK_TIFF)
-    print(f"raw {raw.shape} {raw.dtype} | mask {mask.shape} "
-          f"({len(np.unique(mask)) - 1:,} cells)")
-    return raw, list(protocol.PANEL), mask
 
 
 def resolve_markers(names: list[str]) -> list[str]:
@@ -308,7 +276,7 @@ def main() -> None:
     model_path = str(download_model())
     print(f"checkpoint: {model_path}")
 
-    raw, names, mask = load_panel_stack()
+    raw, names, mask = protocol.load_panel_stack()
     channel_names = resolve_markers(names)
 
     if args.stage in ("all", "zeroshot"):
