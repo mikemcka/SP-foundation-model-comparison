@@ -3,7 +3,7 @@
 **Findings: [RESULTS.md](RESULTS.md).** This file is the protocol and the
 how-to-run.
 
-Three foundation models for spatial proteomics, scored on the same cells, the
+Four foundation models for spatial proteomics, scored on the same cells, the
 same labels, the same spatial folds and the same probe:
 
 | Model | Kind | Weights | Repo |
@@ -11,10 +11,15 @@ same labels, the same spatial folds and the same probe:
 | **KRONOS2** | marker-aware vision ViT | gated HF repo `MahmoodLab/KRONOS2` | [CORAL](https://github.com/mahmoodlab/CORAL) (companion toolkit), [KRONOS](https://github.com/mahmoodlab/KRONOS) |
 | **DeepCell Types** | language-informed vision | gated, `users.deepcell.org` | [deepcell-types](https://github.com/vanvalenlab/deepcell-types) |
 | **Spatium** | protein-language transformer | vendored `Spatium/final.ckpt` | [Spatium](https://github.com/ploughhh/Spatium) |
+| **VirTues** | whole-tissue ViT, ESM-keyed channels | public HF repo `bunnelab/virtues` | [virtues](https://github.com/bunnelab/virtues), driven through [VirTues-Nextflow](https://github.com/mikemcka/VirTues-Nextflow) |
 
 A **mean-marker** readout (per-cell average intensity per channel) is scored
-alongside them. It is not a fourth competitor — it is the control that says
+alongside them. It is not a fifth competitor — it is the control that says
 whether a foundation model is earning its keep on a well-designed antibody panel.
+
+**VirTues is not pixel-matched to the other three.** Read
+[the caveat](#virtues-reads-more-tissue-than-the-others) before comparing its row
+to theirs.
 
 ## The dataset
 
@@ -80,6 +85,30 @@ draw a wrong conclusion from this repo.
   vocabulary alignment.
 - **Spatium is also probed, not only fine-tuned**, for the same reason.
 
+### VirTues reads more tissue than the others
+
+The one place this benchmark's "identical inputs" claim genuinely does not hold,
+so it is stated rather than buried.
+
+KRONOS2 and DeepCell Types read a 64 px box centred on the cell at the slide's
+native 0.37 mpp — about **24 µm** of tissue. Spatium reads no pixels at all, just
+the cell's own 18 numbers. VirTues resamples to its native 1.0 mpp and runs
+alternating spatial and marker attention over 128 px crops, so every patch token
+it emits has already attended over roughly **128 µm** — a cell's token carries its
+neighbourhood, not just the cell.
+
+That is a property of the architecture, not a protocol slip, and it cannot be
+corrected away: there is no way to shrink VirTues' receptive field without
+retraining it. The consequence for reading the table is specific — a VirTues win
+is *not* evidence of a better per-cell representation, because cell type in
+lymphoid tissue is partly predictable from neighbourhood alone (a cell inside a
+B-cell follicle is probably a B cell). It is evidence that a model with tissue
+context beats models without it, which is a different and weaker claim.
+
+Everything else stays pinned: the same cells, the same labels, the same quadrant
+folds and guard band, the same 2,000-cells-per-class budget, the same Optuna
+search over the same `C` range, the same metrics.
+
 ### Marker harmonisation
 
 Three separate name-resolution steps, all of them load-bearing.
@@ -100,12 +129,13 @@ human decision, applied in `MARKER_MAP_FIXES`
 **2 and 3. CORAL's names → each model's own vocabulary.** This is not cosmetic —
 it decides what each model can see.
 
-| Panel marker | KRONOS2 | DeepCell Types | Spatium |
-| --- | --- | --- | --- |
-| `dapi` | ✅ | ✅ as `dsDNA` | ❌ not a protein — outside a protein-language vocabulary |
-| `mct` (mast cell tryptase) | ✅ | ✅ as `Tryptase` | ❌ no tryptase entry |
-| `cd30` | ✅ | ❌ **no CD30/TNFRSF8 entry** | ✅ |
-| other 15 | ✅ | ✅ | ✅ |
+| Panel marker | KRONOS2 | DeepCell Types | Spatium | VirTues |
+| --- | --- | --- | --- | --- |
+| `dapi` | ✅ | ✅ as `dsDNA` | ❌ not a protein — outside a protein-language vocabulary | ❌ DNA has no sequence for ESM-2 to embed |
+| `mct` (mast cell tryptase) | ✅ | ✅ as `Tryptase` | ❌ no tryptase entry | ✅ as `TPSAB1` (Q15661) |
+| `cd30` | ✅ | ❌ **no CD30/TNFRSF8 entry** | ✅ | ✅ as `TNFRSF8` (P28908) |
+| other 15 | ✅ | ✅ | ✅ | ✅ |
+| **total** | **18/18** | **17/18** | **16/18** | **17/18** |
 
 KRONOS2 is marker-agnostic — it encodes whatever channels the patch carries — so
 it sees 18/18. DeepCell Types sees 17/18 but is **missing the marker that defines
@@ -113,6 +143,40 @@ the Tumor (Hodgkin Reed-Sternberg) class in this dataset**. Spatium sees 16/18.
 Aliases are declared explicitly in [src/run_dct.py](src/run_dct.py); Spatium's own
 `protein_standard_mapping.tsv` does the gene-symbol conversion (`cd20` → `MS4A1`,
 `cd11b` → `ITGAM`, `cytokeratin` → `KRT`).
+
+**VirTues has no marker vocabulary at all.** A channel is identified only by an
+ESM-2 (`esm2_t30_150M_UR50D`, 640-d) embedding of its target protein's amino acid
+sequence — no name matching, no alias table inside the model, no fallback, no
+default statistics. That is what makes it panel-agnostic, and it is also why DAPI
+is unreachable: DNA has no amino acid sequence, so there is nothing honest to
+embed. Two aliases are declared in
+[src/common/virtues_marker_uniprot.csv](src/common/virtues_marker_uniprot.csv)
+(`cytokeratin` → P02533, `mct` → Q15661) on top of VirTues-Nextflow's shipped
+96-marker table.
+
+VirTues-Nextflow ships an optional override presenting DNA stains as Histone H3
+(P68431). It is **deliberately not used**: it asserts DAPI pixels can stand in for
+H3 pixels, and handing one encoder an extra channel on an assumption the others'
+vocabularies are not offered would put a stand-in inside a representation
+comparison. Spatium loses `dapi` for the same class of reason and is not
+compensated either, so the two are held to the same rule.
+
+Two failure modes here are silent rather than loud, which is why both are pinned:
+
+- **A wrong `mpp`** produces a complete run with normal-looking embeddings.
+  VirTues takes no `mpp` argument and does no internal resampling — its corpus is
+  stored at 1.0 µm/px, so its 8 px patch *is* an 8 µm patch and the wrapper
+  resamples to match. `protocol.MPP` is the single source of that number.
+- **The marker-embedding directory is order-sensitive.** VirTues stacks the
+  directory's `.pt` files in *sorted filename* order and derives the
+  accession → row index map from that same order, so which row a protein occupies
+  depends on which other files are present. It is built once, into one directory,
+  and then left alone; rebuilding it against a different panel would silently
+  reindex every channel with nothing erroring.
+
+The in-pipeline detector for both is masked-reconstruction QC
+(`bin/virtues_impute.py --mode qc` in VirTues-Nextflow), worth one run on this
+panel before trusting the numbers.
 
 DeepCell Types' 51-class vocabulary is mapped onto the 16 cHL classes in
 [src/common/dct_class_map.yaml](src/common/dct_class_map.yaml), by one uniform

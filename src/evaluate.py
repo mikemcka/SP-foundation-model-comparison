@@ -37,16 +37,29 @@ from common import probe, protocol  # noqa: E402
 
 FIGURES = protocol.RESULTS / "figures"
 
-# Categorical slots 1-3 of the validated default palette for the three
-# foundation models; the mean-marker baseline takes neutral ink because it is a
-# reference line, not a fourth competitor. Validated all-pairs, light mode:
-# worst CVD dE 9.2, worst normal-vision dE 24.0. Aqua sits below 3:1 on the
-# light surface, so every chart using it ships value labels or a companion
-# table (the relief rule).
+# One categorical slot per foundation model; the mean-marker baseline takes
+# neutral ink because it is a reference line, not a fifth competitor.
+#
+# Validated all-pairs as CIEDE2000 under normal vision plus Machado severity-1.0
+# protanopia, deuteranopia and tritanopia. Worst pair over the whole palette is
+# dE 14.6 (KRONOS2 vs Spatium, tritanopia), which is a pre-existing limit of the
+# original three; every pair involving VirTues is >= 16.5, so the fourth slot
+# does not tighten the floor.
+#
+# VirTues' brick was chosen over the obvious purple: #8a5cd6 sits at dE 1.4 from
+# the KRONOS2 blue under deuteranopia — the two bars would be one colour for the
+# commonest form of CVD. Blue and purple collapse together on a deutan/protan
+# axis, so the fourth categorical slot in a palette that already spends blue has
+# to leave that hue family entirely.
+#
+# Spatium's aqua and DeepCell Types' orange sit below 3:1 on the light surface,
+# so every chart using them ships value labels or a companion table (the relief
+# rule). The brick is 8.1:1 and needs no relief of its own.
 COLORS = {
     "KRONOS2": "#2a78d6",
     "DeepCell Types": "#eb6834",
     "Spatium": "#1baf7a",
+    "VirTues": "#8f2d2d",
     "mean-marker": "#6b6a66",
 }
 METRICS = ["F1-Score", "Balanced Accuracy", "Average Precision", "ROC AUC"]
@@ -57,6 +70,7 @@ ENCODERS = {
     "KRONOS2": "kronos2.npz",
     "DeepCell Types": "deepcell_types.npz",
     "Spatium": "spatium.npz",
+    "VirTues": "virtues.npz",
 }
 
 # The collapse applied by `--collapse`: DeepCell Types has a single, undivided
@@ -90,10 +104,10 @@ def run_probes(
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray]]:
     """Probe every encoder whose features are on disk.
 
-    Results are cached per encoder, keyed by :func:`_cache_key`, so adding a
-    fourth encoder re-probes only that one instead of redoing the other three
-    — each probe is 15 Optuna trials x 4 folds of multinomial logistic
-    regression and takes the better part of an hour.
+    Results are cached per encoder, keyed by :func:`_cache_key`, so adding an
+    encoder re-probes only that one instead of redoing the others — each probe
+    is 15 Optuna trials x 4 folds of multinomial logistic regression and takes
+    the better part of an hour.
 
     Args:
         cells: The canonical cell table.

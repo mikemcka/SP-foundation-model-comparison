@@ -24,10 +24,19 @@ mkdir -p "$LOGS"
 
 cd "$REPO"
 
-if [[ -z "${HF_TOKEN:-}" || -z "${DEEPCELL_ACCESS_TOKEN:-}" ]]; then
-    echo "error: run 'source env/secrets.env' first (both model downloads are gated)." >&2
-    exit 1
-fi
+# Only the gated downloads need credentials: MahmoodLab/KRONOS2 is
+# manual-approval on Hugging Face and DeepCell Types wants a users.deepcell.org
+# token. VirTues' weights are public (`bunnelab/virtues`), and the evaluator only
+# reads files, so demanding tokens for those stages would be a wrong error.
+case "${1:-all}" in
+    all|prep|gpu|kronos2|dct)
+        if [[ -z "${HF_TOKEN:-}" || -z "${DEEPCELL_ACCESS_TOKEN:-}" ]]; then
+            echo "error: run 'source env/secrets.env' first (KRONOS2 and DeepCell" \
+                 "Types are both gated downloads)." >&2
+            exit 1
+        fi
+        ;;
+esac
 
 # Call an env's interpreter by absolute path rather than activating it.
 # `sbatch --wrap` runs its script under /bin/sh, where `module load miniconda3`
@@ -59,6 +68,24 @@ on_gpu() {
     fi
 }
 
+# VirTues needs its own launcher because flash-attn is not optional for it:
+# VirTues' attention blocks import flash_attn at module scope, and flash-attn 2.x
+# needs compute capability >= 8.0. gpuq holds A30s and A100s (both 8.0) but also
+# P100s (6.0), where the import fails outright — so the card is requested by name
+# rather than left to the scheduler. A100 first because the resampled stack plus
+# the token accumulators want the headroom.
+on_ampere() {
+    local env_name=$1; shift
+    if [[ -n "${GPU_JOBID:-}" ]]; then
+        srun --jobid="$GPU_JOBID" --export=ALL --chdir="$REPO" bash -c "$*"
+    else
+        sbatch --wait --partition=gpuq --gres=gpu:A100:1 --cpus-per-task=8 \
+            --mem=256G --time=8:00:00 --job-name="sp-$env_name" \
+            --output="$LOGS/%x-%j.out" --export=ALL --chdir="$REPO" \
+            --wrap="$*"
+    fi
+}
+
 # The probe is the one CPU-heavy stage: 15 Optuna trials x 4 folds x 4 encoders
 # of multinomial logistic regression on up to 32k x 768. Give it real cores —
 # the solver is BLAS-bound, so it scales with threads.
@@ -77,6 +104,15 @@ stage_prep()     { in_env sp-coral   src/prep_coral.py              2>&1 | tee "
 stage_kronos2()  { on_gpu  sp-coral  "$(py sp-coral) src/run_kronos2.py"  2>&1 | tee "$LOGS/kronos2.log"; }
 stage_dct()      { on_gpu  sp-dct    "$(py sp-dct) src/run_dct.py"      2>&1 | tee "$LOGS/dct.log"; }
 stage_spatium()  { on_gpu  sp-spatium "$(py sp-spatium) src/run_spatium.py" 2>&1 | tee "$LOGS/spatium.log"; }
+# VirTues is three stages on three kinds of machine, not one: the panel export
+# needs CORAL (sp-coral) to read the ingested zarr, the marker stage needs
+# outbound network for UniProt and the ESM-2 weights, and only the encode needs a
+# GPU. Splitting them means a GPU job is never queued behind a download.
+stage_virtues_panel()   { in_env sp-coral   src/run_virtues.py --stage panel   2>&1 | tee "$LOGS/virtues-panel.log"; }
+stage_virtues_markers() { in_env sp-virtues src/run_virtues.py --stage markers 2>&1 | tee "$LOGS/virtues-markers.log"; }
+stage_virtues_embed()   { on_ampere sp-virtues "$(py sp-virtues) src/run_virtues.py --stage embed" 2>&1 | tee "$LOGS/virtues-embed.log"; }
+stage_virtues()         { stage_virtues_panel; stage_virtues_markers; stage_virtues_embed; }
+
 stage_evaluate() { on_cpu  sp-coral  "$(py sp-coral) src/evaluate.py"      2>&1 | tee "$LOGS/evaluate.log"; }
 
 # The three GPU stages are independent — each reads prep's outputs and writes
@@ -103,17 +139,24 @@ case "${1:-all}" in
     kronos2)  stage_kronos2 ;;
     dct)      stage_dct ;;
     spatium)  stage_spatium ;;
+    virtues)  stage_virtues ;;
+    virtues-panel)   stage_virtues_panel ;;
+    virtues-markers) stage_virtues_markers ;;
+    virtues-embed)   stage_virtues_embed ;;
     evaluate) stage_evaluate ;;
     all)
         stage_prep
         stage_kronos2
         stage_dct
         stage_spatium
+        stage_virtues
         stage_evaluate
         ;;
     *)
-        echo "usage: $0 [all|prep|gpu|kronos2|dct|spatium|evaluate]" >&2
-        echo "  gpu = submit all three model stages as parallel Slurm jobs" >&2
+        echo "usage: $0 [all|prep|gpu|kronos2|dct|spatium|virtues|evaluate]" >&2
+        echo "  gpu     = submit the three patch-model stages as parallel Slurm jobs" >&2
+        echo "  virtues = panel export, then markers (needs network), then GPU encode" >&2
+        echo "            sub-stages: virtues-panel | virtues-markers | virtues-embed" >&2
         exit 2
         ;;
 esac

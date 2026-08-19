@@ -7,9 +7,11 @@ env/secrets.env
 #   git clone https://github.com/mahmoodlab/CORAL.git
 #   git clone https://github.com/vanvalenlab/deepcell-types.git
 #   git clone https://github.com/ploughhh/Spatium.git
+#   git clone https://github.com/bunnelab/virtues.git
 CORAL/
 deepcell-types/
 Spatium/
+virtues/
 
 # The 3.4 GB Zenodo download and everything derived from it (~14 GB unpacked).
 CORAL/tutorials/example-data/
@@ -21,6 +23,13 @@ work/
 results/features/
 results/probe_cache/
 results/spatium/
+# VirTues' working directory: a 2.2 GB panel OME-TIFF, the ESM-2 marker
+# embeddings, the checkpoint and a ~300 MB token parquet. All regenerable.
+results/virtues/
+# VirTues-Nextflow's marker scripts write these relative to cwd, not under
+# results/ — the downloaded FASTAs and the ESM-2 sequence embeddings.
+esm_work/
+fastas/
 results/logs/
 results/predictions/*.npz
 results/cells.parquet

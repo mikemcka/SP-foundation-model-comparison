@@ -1,0 +1,35 @@
+# Marker -> UniProt overrides for this benchmark's 18-marker cHL CODEX panel.
+#
+# Layered on top of VirTues-Nextflow's assets/marker_uniprot.csv, row by row,
+# by load_marker_table(). Only the rows that file cannot resolve are here.
+#
+# VirTues identifies a channel ONLY by an ESM-2 embedding of its target's amino
+# acid sequence — there is no marker-name vocabulary in the model, no aliasing
+# and no name-matching fallback. A channel with no accession is not seen at all.
+# Matching is separator- and case-insensitive, so `cd11b` already hits the
+# shipped `CD11b` row; the three rows below are the ones CORAL's canonical
+# spelling misses.
+#
+# 17 of the 18 panel markers resolve. See CLAUDE.md for the harmonisation table.
+marker,uniprot_id,gene,source
+# CORAL canonicalises pan-cytokeratin to `cytokeratin`; the shipped table keys
+# the same antibody as `panCK`. Same accession, same stand-in: a pan-CK antibody
+# binds many keratins and spora's table picks KRT14 for all of them.
+cytokeratin,P02533,KRT14,alias-of-panCK
+# `mct` is this panel's name for mast cell tryptase; the shipped table keys it as
+# `Tryptase`. TPSAB1 is alpha/beta-1 tryptase, the dominant mast cell isoform.
+mct,Q15661,TPSAB1,alias-of-Tryptase
+# DAPI is deliberately dropped, not missing. It binds DNA, which has no amino
+# acid sequence, so there is nothing for ESM-2 to embed and no honest accession
+# to give it. This mirrors how Spatium is treated in this benchmark, where dapi
+# is likewise outside a protein-language vocabulary — so the two models are held
+# to the same rule rather than one being quietly helped.
+#
+# VirTues-Nextflow ships assets/marker_uniprot_nuclear_proxy.csv, which presents
+# DNA stains as Histone H3 (P68431) on the grounds that in VirTues' training
+# corpus nuclear signal arrived through H3. That is a stand-in asserting DAPI
+# pixels can substitute for H3 pixels, which is spatially close but wrong in
+# texture and distribution. It is NOT used here: a benchmark scoring frozen
+# representations should not hand one encoder an extra channel on an assumption
+# the other encoders' vocabularies are not offered.
+DAPI,NONE,,not-a-protein
