@@ -1,6 +1,6 @@
-# The three models, and why they disagree
+# The four models, and why they disagree
 
-Background notes on what each foundation model actually encodes. The three take
+Background notes on what each foundation model actually encodes. The four take
 genuinely different views of the same cell, which is what makes comparing them
 interesting — and what makes a single ranking misleading on its own. For the
 benchmark protocol and how to run it, see [CLAUDE.md](CLAUDE.md); for the
@@ -43,6 +43,27 @@ text. Trained on the expression matrices of over 51 million cells.
   molecular phenotype rather than visual morphology.
 - **Key innovation:** ranked protein sequences as a "language" of cell state.
 
+## 4. VirTues — whole-tissue attention with protein-sequence-keyed channels
+
+Tissue-centric: trained on a multi-technology corpus of whole-slide multiplex
+images spanning IMC, CODEX, MIBI and Orion.
+
+- **Input:** whole-tissue image crops (128×128 px at 1.0 µm/px), not individual
+  cells — a cell's representation is pooled afterward from the patch tokens its
+  segmentation mask overlaps, not read out directly.
+- **Features:** alternating spatial and marker attention across the crop, so
+  every patch token is shaped by both its neighbourhood and every other channel
+  measured at that position.
+- **Scale:** tissue context by construction — there is no isolated single-cell
+  view, only cell-, niche- and tissue-level poolings of the same underlying
+  patch tokens.
+- **Key innovation:** channels are identified to the model by an ESM-2
+  embedding of their target protein's amino-acid sequence — the same
+  protein-language idea Spatium uses for expression, but fused into spatial
+  image tokens rather than replacing them. Like KRONOS, it accepts any
+  combination of markers a panel happens to carry; unlike Spatium, it does that
+  without giving up pixels.
+
 ## Summary
 
 | Model | Primary input | Key innovation |
@@ -50,7 +71,8 @@ text. Trained on the expression matrices of over 51 million cells.
 | **KRONOS** | image patches (pixels) | shared convolutional weights + sinusoidal marker encodings |
 | **DeepCell Types** | image + language (semantic) | LLM-generated semantic embeddings to "understand" marker identity |
 | **Spatium** | protein abundance (ranked) | ranked protein sequences as a "language" of cell state |
+| **VirTues** | whole-tissue image crops (pixels) | ESM-2 protein-sequence embeddings fused into spatial attention tokens |
 
-Different as their approaches are, all three provide a transferable latent space
+Different as their approaches are, all four provide a transferable latent space
 for classifying cell types, identifying spatial niches, and detecting patterns
 across datasets and imaging platforms.
