@@ -224,6 +224,15 @@ Three, because the models pin incompatible torch stacks. Built by
 - **Spatium needs per-marker z-scoring.** Only the rank *order* of markers
   survives tokenisation, so on raw intensities the ranking is dominated by which
   antibodies are globally bright — nearly identical for every cell.
+- **`VirTues-Nextflow`'s `standardise()` is patched locally, outside this
+  repo's git.** It's an external clone at
+  `/vast/scratch/users/mckay.m/VirTues-Nextflow` (its own git remote,
+  `mikemcka/VirTues-Nextflow`), not vendored here. The patch adds a `tissue`
+  argument so the clip percentile and log-scale mean/std are computed over
+  tissue-masked pixels only, per the VirTues paper's Methods — the unpatched
+  version used the whole image (67.3% background on this slide). Re-cloning or
+  updating that repo will silently drop the fix; see RESULTS.md's Headline
+  section for what it did and didn't change.
 
 ## Layout
 

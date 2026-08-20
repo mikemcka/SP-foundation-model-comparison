@@ -153,9 +153,11 @@ def export_panel() -> None:
     pre-applied here where a later reader would have no way to see it happened.
 
     Pixels stay uint16 and unscaled. VirTues standardises each channel itself —
-    clip at the 99th percentile, ``log1p``, 3x3 Gaussian blur, z-score — and the
-    z-score after the log removes any global scale factor, so normalising first
-    would only interpolate the intensities twice.
+    clip at the 99th percentile, ``log1p``, 3x3 Gaussian blur, z-score, all
+    three statistics restricted to tissue-masked pixels per the paper's
+    Methods ("Dataset preprocessing") — and the z-score after the log removes
+    any global scale factor, so normalising first would only interpolate the
+    intensities twice.
     """
     import tifffile
     from coral import CoralSlide

@@ -22,7 +22,7 @@ times more tissue per token than anything else in this table.**
 | **DeepCell Types** | **0.680** ± 0.020 | 0.736 | 0.769 | 0.974 | **+0.028** |
 | **KRONOS2** | 0.662 ± 0.014 | 0.725 | 0.743 | 0.971 | +0.010 |
 | *mean-marker (control)* | *0.652* ± 0.019 | *0.705* | *0.721* | *0.963* | — |
-| **VirTues** | 0.541 ± 0.011 | 0.615 | 0.601 | 0.946 | −0.111 |
+| **VirTues** | 0.539 ± 0.010 | 0.613 | 0.599 | 0.945 | −0.113 |
 | **Spatium** | 0.516 ± 0.005 | 0.583 | 0.552 | 0.932 | −0.136 |
 
 ![Linear probe summary](results/figures/probe_summary.png)
@@ -49,6 +49,17 @@ not buy back what the architecture gives up elsewhere on a per-cell benchmark �
 most plausibly the loss of DAPI (no amino-acid sequence to embed, see
 [Marker vocabulary](#marker-vocabulary-decides-what-each-model-can-see)) and the
 coarser 1.0 mpp it resamples to, native mpp on this slide being 0.37.
+
+**One candidate cause was tested directly and ruled out.** VirTues'
+upstream preprocessing pipeline computes its per-channel clipping percentile
+and log-scale mean/std over the *whole* image rather than restricting them to
+tissue-masked pixels, as the paper's Methods specifies — on this slide, 67.3%
+background. Fixing that (`VirTues-Nextflow` commit patching `standardise()` to
+accept a tissue mask) and rerunning the GPU encode moved the headline F1 from
+0.5413 to 0.539 — a change smaller than the fold-to-fold standard deviation,
+i.e. no real effect. The wrong-statistics bug was real and worth fixing, but
+it was not why VirTues underperforms here; the receptive-field and DAPI
+explanations above remain the better-supported ones.
 
 ---
 
@@ -127,7 +138,7 @@ zero-shot F1 from 0.223 to only **0.238**:
 | DeepCell Types [probe] | 0.680 | 0.699 |
 | KRONOS2 [probe] | 0.662 | 0.683 |
 | mean-marker [probe] | 0.652 | 0.673 |
-| VirTues [probe] | 0.541 | 0.571 |
+| VirTues [probe] | 0.539 | 0.570 |
 | Spatium [probe] | 0.516 | 0.538 |
 | DeepCell Types (zero-shot) | 0.223 | **0.238** |
 | Spatium (100-shot) | 0.501 | 0.510 |
@@ -167,8 +178,8 @@ single worst class by a wide margin:
 
 | Class | mean-marker | KRONOS2 | DeepCell Types | Spatium | VirTues |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| **Mast** | 0.805 | 0.772 | 0.798 | **0.104** | 0.627 |
-| Monocyte | 0.523 | 0.549 | 0.583 | 0.279 | 0.444 |
+| **Mast** | 0.805 | 0.772 | 0.798 | **0.104** | 0.619 |
+| Monocyte | 0.523 | 0.549 | 0.583 | 0.279 | 0.448 |
 
 It is not that Spatium is bad at mast cells — it cannot see the marker that
 defines them. VirTues does read pixels, but its cell token is pooled from
@@ -193,22 +204,22 @@ morphology and the other 17 channels.
 
 | Class | n cells | mean-marker | KRONOS2 | DeepCell Types | Spatium | VirTues |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| CD4 | 35,947 | 0.592 | 0.653 | **0.655** | 0.494 | 0.556 |
-| CD8 | 16,987 | 0.810 | 0.803 | **0.832** | 0.725 | 0.666 |
-| B | 15,603 | 0.727 | 0.735 | **0.760** | 0.689 | 0.607 |
-| DC | 9,284 | 0.614 | 0.606 | **0.648** | 0.539 | 0.495 |
-| Endothelial | 8,461 | 0.790 | 0.766 | **0.796** | 0.704 | 0.685 |
-| Tumor | 7,864 | **0.849** | 0.847 | 0.792 | 0.781 | 0.795 |
-| M2 | 7,143 | 0.644 | 0.660 | **0.687** | 0.590 | 0.543 |
-| NK | 7,130 | 0.691 | 0.669 | **0.728** | 0.588 | 0.558 |
-| Monocyte | 6,736 | 0.523 | 0.549 | **0.583** | 0.279 | 0.444 |
-| Other | 4,996 | 0.538 | **0.622** | 0.618 | 0.487 | 0.472 |
-| Lymphatic | 3,685 | **0.821** | 0.787 | 0.812 | 0.729 | 0.701 |
-| Neutrophil | 3,339 | 0.674 | 0.642 | **0.694** | 0.579 | 0.523 |
-| Mast | 3,210 | **0.805** | 0.772 | 0.798 | 0.104 | 0.627 |
-| TReg | 3,206 | 0.399 | **0.552** | 0.443 | 0.319 | 0.546 |
-| M1 | 3,027 | 0.460 | 0.489 | **0.531** | 0.360 | 0.347 |
-| Epithelial | 2,207 | 0.613 | 0.572 | **0.632** | 0.473 | 0.341 |
+| CD4 | 35,947 | 0.592 | 0.653 | **0.655** | 0.494 | 0.561 |
+| CD8 | 16,987 | 0.810 | 0.803 | **0.832** | 0.725 | 0.663 |
+| B | 15,603 | 0.727 | 0.735 | **0.760** | 0.689 | 0.598 |
+| DC | 9,284 | 0.614 | 0.606 | **0.648** | 0.539 | 0.489 |
+| Endothelial | 8,461 | 0.790 | 0.766 | **0.796** | 0.704 | 0.682 |
+| Tumor | 7,864 | **0.849** | 0.847 | 0.792 | 0.781 | 0.781 |
+| M2 | 7,143 | 0.644 | 0.660 | **0.687** | 0.590 | 0.539 |
+| NK | 7,130 | 0.691 | 0.669 | **0.728** | 0.588 | 0.563 |
+| Monocyte | 6,736 | 0.523 | 0.549 | **0.583** | 0.279 | 0.448 |
+| Other | 4,996 | 0.538 | **0.622** | 0.618 | 0.487 | 0.462 |
+| Lymphatic | 3,685 | **0.821** | 0.787 | 0.812 | 0.729 | 0.706 |
+| Neutrophil | 3,339 | 0.674 | 0.642 | **0.694** | 0.579 | 0.521 |
+| Mast | 3,210 | **0.805** | 0.772 | 0.798 | 0.104 | 0.619 |
+| TReg | 3,206 | 0.399 | 0.552 | 0.443 | 0.319 | **0.567** |
+| M1 | 3,027 | 0.460 | 0.489 | **0.531** | 0.360 | 0.340 |
+| Epithelial | 2,207 | 0.613 | 0.572 | **0.632** | 0.473 | 0.339 |
 
 ### Where the vision models earn their keep
 
@@ -231,16 +242,19 @@ and **Mast** (0.805) — all classes defined by a single bright, unambiguous mar
 (CD30, podoplanin, tryptase). When one channel answers the question, averaging it
 is not just sufficient, it is optimal.
 
-**VirTues' one genuine bright spot is also TReg: 0.546, essentially tied with
-KRONOS2 (0.552) and well clear of mean-marker (0.399) and DeepCell Types
-(0.443).** That is worth pausing on, because VirTues is exactly the encoder the
-subcellular-localisation argument above should *not* apply to — its cell token
-is pooled from 8 px (8 µm) patches, coarser than KRONOS2's native-resolution
-crop. Eight microns is still smaller than a lymphocyte (~10 µm), so some
-within-cell FOXP3 signal survives the pooling; apparently enough to do what
-whole-cell averaging cannot. Everywhere else, VirTues is the single
-worst-scoring model on 10 of the 16 classes — Epithelial (0.341, a full 0.13
-below Spatium's 0.473) and CD8 (0.666, below Spatium's 0.725) are its weakest.
+**VirTues' one genuine bright spot is also TReg — and after fixing its
+preprocessing (see [the headline](#headline)) it is the outright best model
+on that class: 0.567, ahead of KRONOS2's 0.552, and well clear of mean-marker
+(0.399) and DeepCell Types (0.443).** That is worth pausing on, because
+VirTues is exactly the encoder the subcellular-localisation argument above
+should *not* apply to — its cell token is pooled from 8 px (8 µm) patches,
+coarser than KRONOS2's native-resolution crop. Eight microns is still smaller
+than a lymphocyte (~10 µm), so some within-cell FOXP3 signal survives the
+pooling; apparently enough to do what whole-cell averaging cannot, and enough
+here to edge out a model reading the cell at native resolution. Everywhere
+else, VirTues is the single worst-scoring model on 10 of the 16 classes —
+Epithelial (0.339, a full 0.13 below Spatium's 0.473) and CD8 (0.663, below
+Spatium's 0.725) are its weakest.
 
 ---
 
@@ -255,8 +269,10 @@ mass.
 - **CD4 → B leakage** appears in every model, including the control — the largest
   single confusion in the benchmark.
 - **CD4 ↔ TReg** is the second, and is where KRONOS2 and VirTues separate
-  themselves — VirTues' diagonal on TReg is visibly the closest to KRONOS2's of
-  any model other than KRONOS2 itself.
+  themselves — both show a visibly stronger TReg diagonal than mean-marker or
+  DeepCell Types, consistent with VirTues (0.567 F1) and KRONOS2 (0.552)
+  being the top two models on that class (see
+  [Where the vision models earn their keep](#where-the-vision-models-earn-their-keep)).
 - **Spatium's Mast row has almost no diagonal mass**, spreading instead across
   unrelated classes — the visual signature of a missing defining marker.
   VirTues' Mast row is visibly weaker than the three pixel-matched models but
@@ -264,7 +280,7 @@ mass.
   not the resolution.
 - **M1 ↔ M2** confusion is present in all five, consistent with polarisation
   being the hardest distinction in the panel (M1 is the weakest class for every
-  model: 0.347–0.531).
+  model: 0.340–0.531).
 
 ---
 
@@ -293,16 +309,16 @@ rates pairwise makes it a measurement rather than an impression:
 
 | | KRONOS2 | DeepCell Types | Spatium | VirTues |
 | --- | ---: | ---: | ---: | ---: |
-| **mean-marker** | 0.727 | 0.775 | 0.706 | 0.475 |
-| **KRONOS2** | — | 0.732 | 0.615 | 0.538 |
-| **DeepCell Types** | — | — | 0.649 | 0.442 |
-| **Spatium** | — | — | — | 0.432 |
+| **mean-marker** | 0.727 | 0.775 | 0.706 | 0.473 |
+| **KRONOS2** | — | 0.732 | 0.615 | 0.525 |
+| **DeepCell Types** | — | — | 0.649 | 0.439 |
+| **Spatium** | — | — | — | 0.423 |
 
 Pearson *r* between per-bin error rates. The three models reading this slide at
 native or near-native resolution agree with each other at 0.62–0.78 — strong
 enough that it would not reproduce across three input modalities, one of which
 never sees a pixel, unless something in the tissue or the ground truth there
-were genuinely harder. **Every pair involving VirTues drops to 0.43–0.54,**
+were genuinely harder. **Every pair involving VirTues drops to 0.42–0.53,**
 still clearly positive — it is finding the same rough hot and cold regions, not
 independent noise — but distinctly less tightly than the other three agree with
 each other. The 128 µm receptive field is the obvious candidate: pooling over a
@@ -311,11 +327,11 @@ boundary, a dense follicle edge) that the per-bin error map is measuring at
 60-bin resolution.
 
 Overall error rates: DeepCell Types 29.9%, KRONOS2 31.4%, mean-marker 33.5%,
-VirTues 42.6%, Spatium 43.7%.
+VirTues 42.7%, Spatium 43.7%.
 
 Spatium and VirTues are both uniformly darker rather than differently shaped —
 both fail across the same regions as the other three, just more, and to almost
-the same overall degree (43.7% vs 42.6%) despite getting there by different
+the same overall degree (43.7% vs 42.7%) despite getting there by different
 routes: Spatium from a narrower marker vocabulary and no pixels at all, VirTues
 from a much larger but coarser receptive field.
 
@@ -344,6 +360,15 @@ is what makes the mean across folds worth quoting.
   helps, not that its representation is better) turned out not to be needed in
   this direction, but the underlying point holds either way: context and
   per-cell fidelity are not the same axis.
+- **Preprocessing bugs are worth checking even when the result looks
+  plausible.** VirTues-Nextflow's on-the-fly standardisation was computing its
+  clip percentile and log-scale mean/std over the whole image rather than the
+  tissue-masked area the paper specifies — a real deviation from the
+  published method, on a slide that is 67.3% background. Fixing it and
+  rerunning moved the headline F1 by less than one fold's standard deviation.
+  Confirming that took the same wall-clock as the original run; skipping the
+  check would have left a real bug sitting under a paper-consistent-looking
+  number.
 
 **Does not:**
 - **One slide, one tissue, one platform.** cHL lymph node on CODEX. Nothing here
@@ -358,11 +383,15 @@ is what makes the mean across folds worth quoting.
   vocabulary could not describe this dataset (`Disease_type` padded to `PAD` —
   no lymphoma entry), and it sees the fewest markers (16/18).
 - **VirTues is not pixel-matched to the other three, and its result cannot
-  disentangle two confounded causes.** It loses DAPI structurally (no protein,
-  no ESM-2 embedding) *and* it resamples to a coarser 1.0 mpp *and* it pools
-  over 128 µm rather than reading a single cell — three plausible sources for
-  the gap, stacked on top of each other, with nothing in this benchmark able to
-  attribute the −0.111 F1 to one versus another.
+  disentangle three confounded architectural causes.** It loses DAPI
+  structurally (no protein, no ESM-2 embedding) *and* it resamples to a
+  coarser 1.0 mpp *and* it pools over 128 µm rather than reading a single cell
+  — three plausible sources for the gap, stacked on top of each other, with
+  nothing in this benchmark able to attribute the −0.113 F1 to one versus
+  another. A fourth candidate — a preprocessing bug computing standardisation
+  statistics over the whole image instead of the tissue-masked area — *was*
+  isolated and tested directly (see Headline), and ruled out: fixing it barely
+  moved the number.
 - **Zero-shot DeepCell Types is being scored against a label space it was never
   told about,** via a mapping ([src/common/dct_class_map.yaml](src/common/dct_class_map.yaml))
   that is a defensible judgement call, not ground truth.
