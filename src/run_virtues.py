@@ -1,516 +1,370 @@
-"""VirTues: marker-aware cell summary tokens from the whole tissue.
+"""VirTues: per-cell tokens from a whole-tissue encoding.
 
-Runs in the `sp-virtues` env, on a GPU.
+Three stages, three different machines, handed off through files:
 
-VirTues reads a *tissue*, not a cell. It tiles the whole slide, encodes each tile
+    --stage panel     sp-coral,   CPU        export the panel as an OME-TIFF
+    --stage markers   sp-virtues, CPU + net  UniProt -> ESM-2 marker embeddings
+    --stage embed     sp-virtues, Ampere GPU cell tokens -> features/virtues.npz
+
+VirTues reads a *tissue*, not a cell. It tiles the whole image, encodes each tile
 with alternating spatial and marker attention, and emits one summary token per
-8x8 patch; a cell's representation is the pixel-weighted average of the patch
-tokens its segmentation mask overlaps. So unlike KRONOS2 and DeepCell Types it
-never sees a cell in isolation — every cell token carries its neighbourhood, by
-construction.
+8x8 patch; a cell token is the pixel-overlap-weighted mean of the patch tokens
+that cell intersects (paper Methods, "Aggregation into cell-, niche- and
+tissue-level representations"). Two consequences shape everything below.
 
-Markers are identified to the model by *protein sequence*: each channel is
-embedded with ESM-2 from the canonical amino-acid sequence of its target, and
-that vector is added to every patch token of that channel. The panel therefore
-has to be resolved onto UniProt accessions before anything can run
-(`common/virtues_markers.yaml`), and a channel whose target is not a protein —
-DAPI — has nothing to embed and is dropped. VirTues sees 17 of the 18 markers.
+**Its receptive field is much larger than the other encoders'.** KRONOS2 and
+DeepCell Types read a 64 px box at this slide's native 0.37 mpp — about 24 um of
+tissue. VirTues resamples to 1.0 mpp and runs spatial attention over 128 px
+crops, so every patch token has already attended over ~128 um. Its probe row is
+therefore NOT pixel-matched to the others: it sees neighbourhood context they
+cannot. That is a property of the model, not a protocol slip, and it is reported
+as a caveat rather than corrected away — there is no way to shrink its receptive
+field without retraining it. See RESULTS.md.
 
-Three things here differ from the other model scripts, all forced by the model:
+**It has no marker vocabulary at all.** A channel is identified only by an ESM-2
+embedding of its target protein's amino acid sequence — no name matching, no
+alias table inside the model, no fallback. So DAPI is unusable: DNA has no amino
+acid sequence and there is nothing honest to embed. VirTues sees 17 of the 18
+panel markers, exactly as Spatium sees 16 for the same class of reason. The
+nuclear-proxy stand-in (DAPI presented as Histone H3) is deliberately NOT used;
+see src/common/virtues_marker_uniprot.csv.
 
-* **The slide is resampled to 1.0 um/px.** This is the one place the repo's
-  "hand every model identical pixels plus a truthful mpp" rule cannot hold.
-  VirTues takes no `mpp` argument and does no internal resampling: its training
-  corpus (spora) is stored at a fixed 1.0 um/px, so its 8 px patch *is* an 8 um
-  patch. Feeding it this slide's native 0.37 mpp would silently present every
-  structure at 2.7x the scale it was pretrained on. Resampling is what keeps it
-  on-distribution, so it is the honest choice here even though it is a
-  deviation; area-averaging down is also the mildest resampling in the repo.
+The encoder is not reimplemented here. VirTues-Nextflow already carries a
+heavily-annotated, memory-bounded implementation of exactly this readout in
+`bin/virtues_embeddings.py`, validated against the authors' own demo notebook, so
+this script stages that script's inputs and converts its output rather than
+writing a second copy of the same math for the two to drift apart. The one thing
+worth knowing about its internals: upstream's `compute_cell_tokens` holds every
+crop's tokens plus a tensor per (cell, patch) pair in memory, which is tens of GB
+on a slide this size; the wrapper does the identical arithmetic as a running
+`index_add_` and stays around 285 MB.
 
-* **Preprocessing is replicated rather than imported.** VirTues' own
-  `MultiplexDataset._preprocess` defines it exactly — clip at the per-image 99th
-  percentile, log1p, Gaussian blur, standardise — but reaching it through the
-  shipped loader would mean converting this slide into the spora on-disk format
-  first, which forks the mask and panel handling into a second implementation.
-  The four steps are reproduced against that source instead, from this repo's
-  single canonical slide and mask.
-
-* **No native-usage row.** VirTues' documented cell-phenotyping mode *is* a
-  linear probe on frozen cell tokens (`notebooks/2_demo_cell_phenotyping.ipynb`),
-  so its native mode and the supervision-matched comparison are the same
-  measurement. There is nothing extra to report, unlike DeepCell Types
-  (zero-shot) or Spatium (few-shot).
-
-Weights are the published `virtues-sp32` instance from the public
-`bunnelab/virtues` Hub repo (CC BY-NC 4.0 — academic use only).
+Weights are public — `bunnelab/virtues` needs no token, unlike KRONOS2 and
+DeepCell Types. `virtues-sp32` is the pipeline's default and is CC BY-NC 4.0
+(academic use); `virtues-sp31` is the same model minus one dataset under MIT, for
+commercial work. This benchmark is academic, so sp32 stands.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import protocol  # noqa: E402
 
-VIRTUES_ROOT = protocol.REPO / "virtues"
-BASE_CONFIG = VIRTUES_ROOT / "configs" / "base_config.yaml"
-MARKER_YAML = Path(__file__).resolve().parent / "common" / "virtues_markers.yaml"
+# The wrapper scripts and the shipped marker table live in the Nextflow pipeline;
+# the model source is a clone of the authors' repo. Both are inputs to this
+# stage, so both are overridable rather than hardcoded — but they default to
+# where they actually are, so the common case needs no environment at all.
+NEXTFLOW_REPO = Path(
+    os.environ.get(
+        "VIRTUES_NEXTFLOW", "/vast/scratch/users/mckay.m/VirTues-Nextflow"
+    )
+)
+VIRTUES_REPO = Path(
+    os.environ.get("VIRTUES_REPO", protocol.REPO / "virtues")
+)
+
+JOB_DIR = protocol.DATA_DIR / "processed"
+MASK_TIFF = protocol.CHL_DIR / "segmentation" / "raw_image.tiff"
 
 WORK = protocol.RESULTS / "virtues"
-FASTA_DIR = WORK / "fastas"
-EMBED_ROOT = WORK / "marker_embeddings"
-CHECKPOINT_DIR = WORK / "checkpoints"
+PANEL_TIFF = WORK / "panel.ome.tiff"
+CHANNELS_CSV = WORK / "channels.csv"
+MARKER_EMBEDDINGS = WORK / "marker_embeddings"
+MARKER_REPORT = WORK / "marker_resolution.txt"
+WEIGHTS_DIR = WORK / "weights"
 
-# The ESM-2 instance the published VirTues weights were trained with. Its 640-d
-# output is what `prior_embedding_encoder` expects, so this is a compatibility
-# pin, not a quality choice.
-ESM_MODEL = "esm2_t30_150M_UR50D"
+MARKER_OVERRIDE = Path(__file__).resolve().parent / "common" / "virtues_marker_uniprot.csv"
 
 HF_REPO = "bunnelab/virtues"
-HF_WEIGHTS = "virtues-sp32/model.safetensors"
+MODEL_NAME = "virtues-sp32"
 
-# The resolution VirTues' training corpus is stored at; see the module docstring.
-VIRTUES_MPP = 1.0
-# Sliding-window geometry. tile/patch come from configs/base_config.yaml; the
-# stride and the zero-pad are `compute_cell_tokens`' and the demo notebook's
-# defaults. Stride 42 over a 128 px tile means every pixel is encoded ~9 times
-# in different contexts, which is what makes the per-cell average stable.
-TILE_SIZE = 128
-PATCH_SIZE = 8
-STRIDE = 42
-PAD = 120
-# Upper clipping quantile, per channel, from the standardisation pipeline the
-# published weights were trained under ('quantile_clipping_log1p/uq_0.99_image').
-UPPER_QUANTILE = 0.99
+# VirTues' own native resolution. It takes no mpp argument and does no internal
+# resampling — its training corpus is stored at 1.0 um/px, so its 8 px patch IS
+# an 8 um patch and the wrapper resamples the stack to match. We hand it this
+# slide's true 0.37 mpp and let it do that, which is the same policy every other
+# model in this benchmark gets (see CLAUDE.md, "No resample to 0.5 um/px").
+PREFIX = "chl_codex"
 
 
-def run(cmd: list[str]) -> None:
-    """Run one of VirTues' own utility scripts, echoing it first."""
-    print("\n$", " ".join(str(c) for c in cmd), flush=True)
-    subprocess.run(cmd, check=True)
+def _wrapper(name: str) -> Path:
+    """Locate one of VirTues-Nextflow's bin/ scripts, or say what is missing."""
+    path = NEXTFLOW_REPO / "bin" / name
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. This stage drives VirTues-Nextflow's wrapper "
+            "scripts; point VIRTUES_NEXTFLOW at that checkout."
+        )
+    return path
 
 
-def resolve_panel() -> tuple[list[str], list[str]]:
-    """Resolve the panel onto UniProt accessions, dropping non-protein channels.
+def _marker_table() -> Path:
+    """The shipped marker -> UniProt table, which the override layers onto."""
+    path = NEXTFLOW_REPO / "assets" / "marker_uniprot.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found (VIRTUES_NEXTFLOW wrong?)")
+    return path
 
-    This is VirTues' marker-harmonisation step, and it is load-bearing: an
-    accession is the *only* handle the model has on a channel's identity.
 
-    Returns:
-        ``(markers, uniprot_ids)`` — the panel markers VirTues can see, and
-        their accessions, positionally aligned.
+def _check_virtues_repo() -> Path:
+    """Fail early if the model source is not staged.
 
-    Raises:
-        ValueError: If a panel marker has no entry at all (as opposed to an
-            explicit ``null``), which means the panel changed without the map
-            being revisited.
+    VirTues is imported off a clone rather than pip-installed: its pyproject
+    declares only the top-level package and it ships no ``__init__.py`` for
+    ``virtues.utils``, so a non-editable install does not carry what the wrapper
+    imports. The authors' own instruction is ``pip install -e .``; staging the
+    tree does the same thing and pins the exact source that ran.
     """
-    mapping = yaml.safe_load(MARKER_YAML.read_text())["uniprot"]
-    unlisted = [m for m in protocol.PANEL if m not in mapping]
-    if unlisted:
+    if not (VIRTUES_REPO / "virtues").is_dir():
+        raise FileNotFoundError(
+            f"No VirTues source at {VIRTUES_REPO}. Run:\n"
+            f"  git clone https://github.com/bunnelab/virtues.git {VIRTUES_REPO}"
+        )
+    return VIRTUES_REPO
+
+
+def run(cmd: list[str], *, env: dict | None = None) -> None:
+    """Run a wrapper script, echoing the command so logs are reproducible."""
+    print("$", " ".join(str(c) for c in cmd), flush=True)
+    subprocess.run([str(c) for c in cmd], check=True, env=env)
+
+
+# --- stage: panel ----------------------------------------------------------
+
+
+def export_panel() -> None:
+    """Write the 18-marker panel as a named-channel OME-TIFF.
+
+    Channels come from the ingested CORAL slide, not the raw TIFFs, so VirTues
+    reads exactly the planes KRONOS2 and DeepCell Types read, in the same order.
+
+    All 18 are written, DAPI included, even though VirTues cannot use it. Letting
+    its own ``resolve_markers`` drop the channel means the decision is recorded
+    in the marker report by the model's own machinery, rather than being
+    pre-applied here where a later reader would have no way to see it happened.
+
+    Pixels stay uint16 and unscaled. VirTues standardises each channel itself —
+    clip at the 99th percentile, ``log1p``, 3x3 Gaussian blur, z-score, all
+    three statistics restricted to tissue-masked pixels per the paper's
+    Methods ("Dataset preprocessing") — and the z-score after the log removes
+    any global scale factor, so normalising first would only interpolate the
+    intensities twice.
+    """
+    import tifffile
+    from coral import CoralSlide
+
+    slide = CoralSlide.open(JOB_DIR / "raw_image.zarr")
+    available = list(slide.markers)
+    missing = [m for m in protocol.PANEL if m not in available]
+    if missing:
+        raise ValueError(f"panel markers absent from the slide: {missing}")
+
+    idx = [available.index(m) for m in protocol.PANEL]
+    WORK.mkdir(parents=True, exist_ok=True)
+
+    stack = np.asarray(slide.image[idx].values, dtype=np.uint16)
+    print(f"panel stack {stack.shape} {stack.dtype}")
+    tifffile.imwrite(
+        PANEL_TIFF,
+        stack,
+        photometric="minisblack",
+        metadata={"axes": "CYX", "Channel": {"Name": list(protocol.PANEL)}},
+        ome=True,
+        bigtiff=True,
+    )
+    print(f"wrote {PANEL_TIFF} ({PANEL_TIFF.stat().st_size / 1e9:.2f} GB)")
+
+    with open(CHANNELS_CSV, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["sample", "index", "channel"])
+        for i, name in enumerate(protocol.PANEL):
+            writer.writerow([PREFIX, i, name])
+    print(f"wrote {CHANNELS_CSV}")
+
+    # The mask must be pixel-for-pixel the image's size or every cell misaligns.
+    # The wrapper checks this too, but failing here costs seconds instead of a
+    # queued GPU job.
+    mask_shape = tifffile.TiffFile(MASK_TIFF).series[0].shape
+    if tuple(mask_shape[-2:]) != stack.shape[-2:]:
         raise ValueError(
-            f"{unlisted} have no entry in {MARKER_YAML.name}. Add an accession, "
-            "or `null` if the target is not a protein — the decision has to be "
-            "explicit."
+            f"mask is {mask_shape[-2:]} but the panel is {stack.shape[-2:]}"
         )
-
-    markers = [m for m in protocol.PANEL if mapping[m]]
-    dropped = [m for m in protocol.PANEL if not mapping[m]]
-    print("\nmarker resolution (CORAL -> UniProt):")
-    for m in protocol.PANEL:
-        print(f"  {m:<14} -> {mapping[m] or 'DROPPED (not a protein)'}")
-    print(f"\nVirTues sees {len(markers)} of {len(protocol.PANEL)} panel markers"
-          + (f"; dropped {dropped}" if dropped else ""))
-    return markers, [mapping[m] for m in markers]
+    print(f"mask {MASK_TIFF.name} {mask_shape} matches the panel")
 
 
-def ensure_marker_embeddings(uniprot_ids: list[str], *, device: str) -> Path:
-    """Fetch each target's canonical sequence and embed it with ESM-2.
+# --- stage: markers --------------------------------------------------------
 
-    Both steps are VirTues' own scripts, unmodified, so the embeddings are
-    produced exactly as the ones the model was trained against. Needs internet;
-    the GPU stage does not, which is why they are separate stages.
 
-    Args:
-        uniprot_ids: Accessions to embed.
-        device: Torch device for ESM-2. CPU is fine and is the safe choice for
-            long sequences.
+def build_marker_embeddings() -> None:
+    """Resolve the panel to UniProt and embed each accession with ESM-2.
 
-    Returns:
-        The directory of ``[accession].pt`` embeddings.
+    Needs outbound network twice — UniProt for the sequences, then the ESM-2
+    weights — which is why it is its own stage: cluster GPU nodes frequently have
+    none.
 
-    Raises:
-        RuntimeError: If any accession fails to download or embed —
-            ``download_fastas`` only prints on a failed fetch, and a missing
-            marker would otherwise show up as a silently weaker model.
+    Built ONCE, into one directory, and then left alone. ``load_marker_embeddings``
+    stacks the directory's ``.pt`` files in *sorted filename* order and
+    ``load_marker_embedding_dict`` derives the accession -> row index map from
+    that same order, so which row a protein occupies depends on which other files
+    are present. Rebuilding this directory with a different panel would silently
+    reindex every channel; nothing would error and the embeddings would just be
+    wrong.
+
+    ``--allow-unmapped-markers`` is deliberately NOT passed: a channel with no
+    table entry should stop the run, because VirTues has no way to be told what
+    it is and would quietly embed a smaller panel than the image carries.
     """
-    embed_dir = EMBED_ROOT / ESM_MODEL
-    FASTA_DIR.mkdir(parents=True, exist_ok=True)
+    _check_virtues_repo()
+    if not CHANNELS_CSV.exists():
+        raise FileNotFoundError(
+            f"{CHANNELS_CSV} not found; run --stage panel first (env sp-coral)."
+        )
+    run([
+        sys.executable, _wrapper("virtues_markers.py"),
+        "--channels", CHANNELS_CSV,
+        "--virtues-repo", _check_virtues_repo(),
+        "--marker-table", _marker_table(),
+        "--marker-uniprot", MARKER_OVERRIDE,
+        "--outdir", MARKER_EMBEDDINGS,
+        "--report", MARKER_REPORT,
+        "--device", "cpu",
+    ], env={**os.environ, "PYTHONPATH": str(NEXTFLOW_REPO / "bin")})
 
-    ids_csv = WORK / "panel_uniprot.csv"
-    pd.DataFrame({"protein_id": uniprot_ids}).to_csv(ids_csv, index=False)
-
-    run([sys.executable, "-m", "virtues.utils.download_fastas",
-         "--output_dir", str(FASTA_DIR), "--input", str(ids_csv),
-         "--id_column", "protein_id"])
-    absent = [u for u in uniprot_ids if not (FASTA_DIR / f"{u}.fasta").exists()]
-    if absent:
-        raise RuntimeError(
-            f"UniProt returned no sequence for {absent}. Check the accessions in "
-            f"{MARKER_YAML.name} — a wrong one fails silently at download time."
+    accessions = sorted(p.stem for p in MARKER_EMBEDDINGS.glob("*.pt"))
+    print(f"\n{len(accessions)} marker embeddings: {accessions}")
+    if len(accessions) != len(protocol.PANEL) - 1:
+        print(
+            f"NOTE: {len(protocol.PANEL)} panel markers -> {len(accessions)} "
+            "embeddings. One drop (DAPI) is expected and intended; anything "
+            "else means the marker table changed.",
+            file=sys.stderr,
         )
 
-    run([sys.executable, "-m", "virtues.utils.compute_esm_embeddings",
-         "--input_dir", str(FASTA_DIR), "--output_dir", str(EMBED_ROOT),
-         "--model", ESM_MODEL, "--device", device])
 
-    # The loader takes *every* .pt in the directory and orders them by filename,
-    # so a stale embedding from an earlier panel would shift every marker index
-    # by one without any error. Check the set matches exactly.
-    on_disk = sorted(p.stem for p in embed_dir.glob("*.pt"))
-    if on_disk != sorted(uniprot_ids):
-        raise RuntimeError(
-            f"{embed_dir} holds {on_disk}, expected {sorted(uniprot_ids)}. "
-            "Delete the directory and re-run the markers stage."
-        )
-    print(f"\n{len(on_disk)} marker embeddings ready -> {embed_dir}")
-    return embed_dir
-
-
-def build_model(embed_dir: Path, uniprot_ids: list[str], *, device: str):
-    """Instantiate VirTues with this panel's marker embeddings and load weights.
-
-    Every architecture argument comes from VirTues' shipped
-    ``configs/base_config.yaml``, which is the configuration the released
-    weights were trained under. The marker embeddings are passed as a
-    non-persistent buffer, so they are *not* part of the checkpoint: each
-    dataset supplies its own panel's embeddings and the same weights index into
-    them.
-
-    Returns:
-        ``(model, marker_indices)`` — the model in eval mode on ``device``, and
-        the row of the embedding matrix each panel channel maps to.
-    """
-    import torch
+def fetch_weights() -> Path:
+    """Download the released checkpoint once and return its path."""
     from huggingface_hub import hf_hub_download
-    from omegaconf import OmegaConf
-    from safetensors.torch import load_file
 
-    from virtues.modules.multiplex_virtues import MultiplexVirtues
-    from virtues.utils.utils import load_marker_embedding_dict, load_marker_embeddings
-
-    conf = OmegaConf.load(BASE_CONFIG)
-    embeddings = load_marker_embeddings(str(embed_dir))
-    lookup = load_marker_embedding_dict(str(embed_dir))
-    marker_indices = torch.tensor([lookup[u] for u in uniprot_ids], dtype=torch.long)
-
-    model = MultiplexVirtues(
-        use_default_config=False,
-        custom_config=None,
-        prior_bias_embeddings=embeddings,
-        prior_bias_embedding_type="esm",
-        prior_bias_embedding_fusion_type="add",
-        patch_size=conf.model.patch_size,
-        model_dim=conf.model.model_dim,
-        feedforward_dim=conf.model.feedforward_dim,
-        encoder_pattern=conf.model.encoder_pattern,
-        num_encoder_heads=conf.model.num_encoder_heads,
-        decoder_pattern=conf.model.decoder_pattern,
-        num_decoder_heads=conf.model.num_decoder_heads,
-        num_hidden_layers=conf.model.num_decoder_hidden_layers,
-        positional_embedding_type=conf.model.positional_embedding_type,
-        dropout=conf.model.dropout,
-        group_layers=conf.model.group_layers,
-        norm_after_encoder_decoder=conf.model.norm_after_encoder_decoder,
-        verbose=False,
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = hf_hub_download(
+        repo_id=HF_REPO,
+        filename=f"{MODEL_NAME}/model.safetensors",
+        local_dir=str(WEIGHTS_DIR),
     )
-    weights = hf_hub_download(
-        repo_id=HF_REPO, filename=HF_WEIGHTS, local_dir=str(CHECKPOINT_DIR)
-    )
-    model.load_state_dict(load_file(weights, device="cpu"))
-    print(f"loaded {HF_WEIGHTS} ({embeddings.shape[1]}-d marker embeddings, "
-          f"{conf.model.model_dim}-d tokens)")
-    return model.to(device).eval(), marker_indices.to(device)
+    print(f"staged {path}")
+    return Path(path)
 
 
-def rescale(raw: np.ndarray, mask: np.ndarray, cells: pd.DataFrame):
-    """Resample the slide and mask from 0.37 to 1.0 um/px.
-
-    Intensities are area-averaged, which is the right reduction for a downscale:
-    it is the mean of the pixels a target pixel covers, so it neither invents
-    signal nor drops isolated bright pixels the way point sampling would.
-
-    The mask is *point sampled* instead — a label image has no meaningful
-    average. At 2.7x down, a handful of the smallest cells can lose every pixel
-    they had; those are restored at their own centroid, so no cell in the
-    canonical table can go missing from the feature matrix (which would be an
-    unscorable hole, not a small error).
-
-    Args:
-        raw: ``(C, H, W)`` float32 intensities at :data:`protocol.MPP`.
-        mask: ``(H, W)`` label image at :data:`protocol.MPP`.
-        cells: The canonical cell table, for the centroid restore.
-
-    Returns:
-        ``(image, mask)`` at :data:`VIRTUES_MPP`.
-    """
-    import torch
-
-    scale = protocol.MPP / VIRTUES_MPP
-    h, w = mask.shape
-    new_h, new_w = int(round(h * scale)), int(round(w * scale))
-
-    image = np.empty((len(raw), new_h, new_w), dtype=np.float32)
-    for c in range(len(raw)):
-        plane = torch.from_numpy(raw[c])[None, None]
-        image[c] = torch.nn.functional.interpolate(
-            plane, size=(new_h, new_w), mode="area"
-        )[0, 0].numpy()
-
-    rows = np.minimum(((np.arange(new_h) + 0.5) / scale).astype(int), h - 1)
-    cols = np.minimum(((np.arange(new_w) + 0.5) / scale).astype(int), w - 1)
-    small = mask[rows[:, None], cols[None, :]]
-
-    lost = np.setdiff1d(cells.index.to_numpy(), np.unique(small), assume_unique=False)
-    if len(lost):
-        rows_ = np.clip((cells.loc[lost, "y"].to_numpy() * scale).astype(int), 0, new_h - 1)
-        cols_ = np.clip((cells.loc[lost, "x"].to_numpy() * scale).astype(int), 0, new_w - 1)
-        small[rows_, cols_] = lost
-    print(f"resampled {protocol.MPP} -> {VIRTUES_MPP} mpp: {(h, w)} -> "
-          f"{(new_h, new_w)} px | restored {len(lost):,} cells at their centroid")
-    return image, small
+# --- stage: embed ----------------------------------------------------------
 
 
-def standardize(image: np.ndarray, *, blur: bool):
-    """Apply VirTues' image preprocessing, then zero-pad for the sliding window.
-
-    Reproduces ``virtues.data.multiplex_dataset.MultiplexDataset._preprocess``
-    step for step: clip to ``[0, q99]`` per channel, log1p, Gaussian blur
-    (3x3, sigma 1), then standardise by the channel's log-scale mean and std.
-
-    Statistics come from this slide, which is what spora's ``uq_0.99_image``
-    pipeline does for the quantile. Its mean and std are corpus-level; with a
-    single slide there is nothing else to compute them from, and using this
-    slide's own is the closer approximation of the two available.
-
-    Statistics are computed *before* padding so the zeros cannot drag them,
-    which is the order the demo notebook gets for free by loading precomputed
-    stats. The blur runs before padding too, for a smaller reason: on the padded
-    image it would mix tissue with the zero moat and leave a darkened one-pixel
-    ring around the slide. Blurring first leaves the border reflected, which is
-    what the training path sees.
-
-    Args:
-        image: ``(C, H, W)`` float32 intensities at :data:`VIRTUES_MPP`.
-        blur: Apply the Gaussian blur. On by default because the pretraining
-            path applies it; the phenotyping notebook standardises without it,
-            and ``--no-blur`` runs that reading. See CLAUDE.md.
-
-    Returns:
-        A ``(C, H + 2*PAD, W + 2*PAD)`` float32 torch tensor.
-    """
-    import torch
-    from torchvision.transforms import v2
-
-    out = torch.empty(
-        (len(image), image.shape[1] + 2 * PAD, image.shape[2] + 2 * PAD),
-        dtype=torch.float32,
-    )
-    gaussian = v2.GaussianBlur(kernel_size=3, sigma=1.0)
-    for c in range(len(image)):
-        upper = float(np.quantile(image[c], UPPER_QUANTILE))
-        plane = torch.log1p(torch.from_numpy(image[c]).clamp(min=0, max=upper))
-        mean, std = plane.mean(), plane.std()
-        if blur:
-            plane = gaussian(plane[None])[0]
-        plane = torch.nn.functional.pad(plane[None], (PAD, PAD, PAD, PAD))
-        out[c] = (plane[0] - mean) / (std + 1e-9)
-    print(f"standardised {tuple(out.shape)}"
-          + ("" if blur else " (blur skipped)"))
-    return out
-
-
-def cell_tokens(
-    model,
-    image,
-    marker_indices,
-    mask: np.ndarray,
-    cells: pd.DataFrame,
-    *,
-    device: str,
-    stride: int,
-    chunk_size: int,
-) -> np.ndarray:
-    """Encode the slide tile by tile and pool patch tokens into cell tokens.
-
-    Same computation as ``virtues.utils.cell_tokens.compute_cell_tokens`` — the
-    same crop grid (its own ``_get_uniform_crops`` decides it), the same patch
-    tokens, the same pixel-overlap-weighted average per cell — but accumulated
-    into a dense array as it goes instead of collected in per-cell Python lists.
-    On this slide the shipped version would hold every crop's tokens plus a few
-    million single-token tensors in memory at once, which is tens of GB; a
-    ~139k x 512 running sum is 285 MB.
-
-    Two consequences of doing the bookkeeping directly, both exact rather than
-    approximations:
-
-    * Crops containing no canonical cell are never encoded. A crop only ever
-      contributes to cells inside it, so skipping them changes no output — and
-      on a slide with background margins it is most of the compute.
-    * Cells outside the canonical table (unlabelled, artifact, guard band) are
-      not accumulated at all.
-
-    Args:
-        model: The loaded VirTues model.
-        image: Padded, standardised ``(C, H, W)`` tensor.
-        marker_indices: Marker embedding row per channel, on ``device``.
-        mask: Padded label image, same ``(H, W)`` as ``image``.
-        cells: The canonical cell table; output rows follow its order.
-        device: Torch device (CUDA — VirTues' attention is FlashAttention).
-        stride: Sliding-window stride in pixels.
-        chunk_size: Crops per forward pass.
-
-    Returns:
-        Float32 ``(len(cells), model_dim)`` cell summary tokens.
-    """
-    import torch
-
-    from virtues.utils.cell_tokens import _get_uniform_crops
-
-    grid = TILE_SIZE // PATCH_SIZE  # patches per tile edge
-    n_cells = len(cells)
-
-    # Dense id -> row lookup; -1 for every mask id that is not scored.
-    row_of_id = np.full(int(max(mask.max(), cells.index.max())) + 1, -1, dtype=np.int64)
-    row_of_id[cells.index.to_numpy()] = np.arange(n_cells)
-    patch_of_pixel = np.repeat(np.arange(grid * grid), PATCH_SIZE * PATCH_SIZE)
-
-    _, indices = _get_uniform_crops(image, stride, tile_size=TILE_SIZE)
-    print(f"\n{len(indices):,} crops of {TILE_SIZE}px at stride {stride}", flush=True)
-
-    sums = torch.zeros((n_cells, model.encoder.model_dim), device=device)
-    weights = torch.zeros(n_cells, device=device)
-    encoded = 0
-
-    for start in range(0, len(indices), chunk_size):
-        chunk = indices[start : start + chunk_size]
-
-        # Mask side first: it decides which crops are worth a forward pass.
-        crops, keys = [], []
-        for row, col in chunk:
-            block = mask[row : row + TILE_SIZE, col : col + TILE_SIZE]
-            rows_ = row_of_id[
-                block.reshape(grid, PATCH_SIZE, grid, PATCH_SIZE)
-                .transpose(0, 2, 1, 3)
-                .reshape(-1)
-            ]
-            keep = rows_ >= 0
-            if not keep.any():
-                continue
-            patches = patch_of_pixel[keep] + len(crops) * grid * grid
-            keys.append(patches.astype(np.int64) * n_cells + rows_[keep])
-            crops.append(image[:, row : row + TILE_SIZE, col : col + TILE_SIZE])
-        if not crops:
-            continue
-
-        batch = [c.to(device, non_blocking=True).contiguous() for c in crops]
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=True):
-            out = model.encoder.forward_list(
-                batch, [marker_indices] * len(batch), multiplex_mask=None
-            )
-        tokens = torch.stack(out.patch_summary_tokens).float().reshape(-1, sums.shape[1])
-
-        # One (patch, cell) pair per unique key, weighted by overlapping pixels.
-        pair, overlap = np.unique(np.concatenate(keys), return_counts=True)
-        rows_t = torch.as_tensor(pair % n_cells, device=device)
-        cols_t = torch.as_tensor(pair // n_cells, device=device)
-        w = torch.as_tensor(overlap, dtype=torch.float32, device=device)
-        sums.index_add_(0, rows_t, tokens[cols_t] * w[:, None])
-        weights.index_add_(0, rows_t, w)
-
-        encoded += len(crops)
-        if (start // chunk_size) % 50 == 0:
-            print(f"  {start + len(chunk):>7,}/{len(indices):,} crops "
-                  f"({encoded:,} encoded)", flush=True)
-
-    empty = int((weights == 0).sum())
-    if empty:
-        raise ValueError(
-            f"{empty:,} canonical cells got no patch token. The mask and the "
-            "image are out of register — check the resampling."
+def encode_cells(device: str, chunk_size: int) -> None:
+    """Run the cell-level pass and leave a parquet of per-cell tokens."""
+    weights = WEIGHTS_DIR / MODEL_NAME / "model.safetensors"
+    if not weights.exists():
+        raise FileNotFoundError(
+            f"{weights} not found; run --stage markers first (it also fetches "
+            "the checkpoint, on a node with network)."
         )
-    print(f"encoded {encoded:,} of {len(indices):,} crops "
-          f"({1 - encoded / len(indices):.0%} skipped as cell-free)")
-    return (sums / weights[:, None]).cpu().numpy().astype(np.float32)
+    if not MARKER_EMBEDDINGS.is_dir():
+        raise FileNotFoundError(
+            f"{MARKER_EMBEDDINGS} not found; run --stage markers first."
+        )
+
+    WORK.mkdir(parents=True, exist_ok=True)
+    run([
+        sys.executable, _wrapper("virtues_embeddings.py"),
+        "--tiff", PANEL_TIFF,
+        # The published mask, not a re-segmentation: the ground-truth labels are
+        # defined on these exact ids, and VirTues pools by mask pixels, so the
+        # ids come straight through to the token table.
+        "--cells", MASK_TIFF,
+        "--marker-embeddings", MARKER_EMBEDDINGS,
+        "--weights", weights,
+        "--config", _check_virtues_repo() / "configs" / "base_config.yaml",
+        "--virtues-repo", _check_virtues_repo(),
+        "--marker-table", _marker_table(),
+        "--marker-uniprot", MARKER_OVERRIDE,
+        "--mpp", protocol.MPP,
+        "--prefix", WORK / PREFIX,
+        # Only the cell level is scored. Niche and tissue tokens are real
+        # readouts but there is nothing to compare them against here: every other
+        # encoder in this benchmark emits one vector per cell.
+        "--levels", "cell",
+        "--chunk-size", chunk_size,
+        "--device", device,
+    ], env={**os.environ, "PYTHONPATH": str(NEXTFLOW_REPO / "bin")})
+
+
+def export_features() -> None:
+    """Convert the token parquet into the shared ``.npz`` feature format.
+
+    The parquet carries every cell in the mask, which is a superset of the
+    canonical table — cells that are unlabelled, artifacts, or too close to the
+    edge to have had a 64 px patch. ``protocol.align_features`` reindexes by id,
+    so the superset is fine and the subset would not be; this only checks that
+    the canonical cells are all actually in there.
+    """
+    import pandas as pd
+
+    parquet = WORK / f"{PREFIX}_cell_tokens.parquet"
+    if not parquet.exists():
+        raise FileNotFoundError(f"{parquet} not found; --stage embed first.")
+
+    frame = pd.read_parquet(parquet)
+    dims = [c for c in frame.columns if c.startswith("dim_")]
+    features = frame[dims].to_numpy(dtype=np.float32)
+    cell_id = frame["cell_id"].to_numpy()
+    print(f"cell tokens {features.shape} for {len(cell_id):,} mask cells")
+
+    cells = protocol.load_cells()
+    absent = np.setdiff1d(cells.index.to_numpy(), cell_id)
+    if len(absent):
+        raise ValueError(
+            f"{len(absent):,} of {len(cells):,} canonical cells have no VirTues "
+            "token; the mask ids may have drifted."
+        )
+
+    out = protocol.RESULTS / "features" / "virtues.npz"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, cell_id=cell_id, features=features)
+    print(f"wrote VirTues features {features.shape} -> {out}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
-        "--esm-device",
-        default="cpu",
-        help="Device for the one-off ESM-2 marker embeddings. CPU is safe for "
-        "long sequences and takes under a minute for 17 proteins.",
+        "--stage", choices=("panel", "markers", "embed"), required=True,
+        help="panel: sp-coral. markers: sp-virtues + network. embed: Ampere GPU.",
     )
-    parser.add_argument("--stride", type=int, default=STRIDE)
-    parser.add_argument("--chunk-size", type=int, default=32)
+    parser.add_argument("--device", default="cuda", help="Torch device.")
     parser.add_argument(
-        "--no-blur",
-        dest="blur",
-        action="store_false",
-        help="Skip the Gaussian blur in preprocessing (see CLAUDE.md).",
+        "--chunk-size", type=int, default=32, help="Crops per forward pass."
     )
     parser.add_argument(
-        "--stage",
-        choices=("all", "markers", "tokens"),
-        default="all",
-        help="markers needs internet and no GPU; tokens needs a GPU and no "
-        "internet beyond the checkpoint download.",
+        "--export-only", action="store_true",
+        help="With --stage embed: skip encoding, only re-export the parquet.",
     )
     args = parser.parse_args()
 
-    WORK.mkdir(parents=True, exist_ok=True)
-    markers, uniprot_ids = resolve_panel()
-
-    if args.stage in ("all", "markers"):
-        embed_dir = ensure_marker_embeddings(uniprot_ids, device=args.esm_device)
+    if args.stage == "panel":
+        export_panel()
+    elif args.stage == "markers":
+        build_marker_embeddings()
+        fetch_weights()
     else:
-        embed_dir = EMBED_ROOT / ESM_MODEL
-    if args.stage == "markers":
-        return
-
-    if not args.device.startswith("cuda"):
-        raise RuntimeError(
-            f"--device {args.device}: VirTues' attention blocks are FlashAttention, "
-            "which is CUDA-only. The tokens stage needs a GPU."
-        )
-
-    cells = protocol.load_cells()
-    model, marker_indices = build_model(embed_dir, uniprot_ids, device=args.device)
-
-    raw, _, mask = protocol.load_panel_stack(markers)
-    image, mask = rescale(raw, mask, cells)
-    del raw
-    image = standardize(image, blur=args.blur)
-    mask = np.pad(mask, PAD)
-
-    features = cell_tokens(
-        model, image, marker_indices, mask, cells,
-        device=args.device, stride=args.stride, chunk_size=args.chunk_size,
-    )
-    out = protocol.RESULTS / "features" / "virtues.npz"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out, cell_id=cells.index.to_numpy(), features=features)
-    print(f"wrote VirTues cell tokens {features.shape} -> {out}")
+        if not args.export_only:
+            encode_cells(args.device, args.chunk_size)
+        export_features()
 
 
 if __name__ == "__main__":

@@ -11,11 +11,15 @@ same labels, the same spatial folds and the same probe:
 | **KRONOS2** | marker-aware vision ViT | gated HF repo `MahmoodLab/KRONOS2` | [CORAL](https://github.com/mahmoodlab/CORAL) (companion toolkit), [KRONOS](https://github.com/mahmoodlab/KRONOS) |
 | **DeepCell Types** | language-informed vision | gated, `users.deepcell.org` | [deepcell-types](https://github.com/vanvalenlab/deepcell-types) |
 | **Spatium** | protein-language transformer | vendored `Spatium/final.ckpt` | [Spatium](https://github.com/ploughhh/Spatium) |
-| **VirTues** | tissue-scale, sequence-aware ViT | public HF repo `bunnelab/virtues` (`virtues-sp32`, CC BY-NC 4.0) | [virtues](https://github.com/bunnelab/virtues), [paper](https://www.nature.com/articles/s41586-026-10884-y) |
+| **VirTues** | whole-tissue ViT, ESM-keyed channels | public HF repo `bunnelab/virtues` | [virtues](https://github.com/bunnelab/virtues), driven through [VirTues-Nextflow](https://github.com/mikemcka/VirTues-Nextflow) |
 
 A **mean-marker** readout (per-cell average intensity per channel) is scored
 alongside them. It is not a fifth competitor — it is the control that says
 whether a foundation model is earning its keep on a well-designed antibody panel.
+
+**VirTues is not pixel-matched to the other three.** Read
+[the caveat](#virtues-reads-more-tissue-than-the-others) before comparing its row
+to theirs.
 
 ## The dataset
 
@@ -65,48 +69,45 @@ draw a wrong conclusion from this repo.
 2. **Native usage mode** — DeepCell Types zero-shot, Spatium few-shot
    (10/20/100 cells per class). This is how each model is meant to be deployed,
    but the supervision differs between rows, so it ranks *deployments*, not
-   representations. KRONOS2 and VirTues have no row here: for both, the
-   documented cell-phenotyping mode *is* a linear probe on frozen features, so
-   their native mode and the supervision-matched comparison are one measurement.
+   representations.
 
 ### Deviations from the original brief
 
-- **No resample to 0.5 µm/px, except for VirTues.** The slide is kept at its
-  native 0.37 mpp and each model is told that number, so each applies its own
-  documented internal resampling. Pre-resampling would interpolate twice for
-  DeepCell Types (which takes `mpp` as an argument and rescales itself) and
-  would move KRONOS2 off the resolution its published benchmark was measured at.
-  Identical pixels plus an identical truthful `mpp` *is* the harmonisation.
-  **VirTues is the exception and has to be**: it takes no `mpp` argument and
-  does no internal resampling, because its training corpus is stored at a fixed
-  1.0 µm/px — its 8 px patch *is* an 8 µm patch. Handing it 0.37 mpp pixels
-  would present every structure at 2.7× the scale it was pretrained on. It is
-  therefore area-averaged down to 1.0 mpp, from the same ingested slide.
+- **No resample to 0.5 µm/px.** The slide is kept at its native 0.37 mpp and
+  each model is told that number, so each applies its own documented internal
+  resampling. Pre-resampling would interpolate twice for DeepCell Types (which
+  takes `mpp` as an argument and rescales itself) and would move KRONOS2 off the
+  resolution its published benchmark was measured at. Identical pixels plus an
+  identical truthful `mpp` *is* the harmonisation.
 - **DeepCell Types is also probed, not only run zero-shot.** Its `cls_embedding`
   is exposed on the model output, so it can join the supervision-matched table.
   Without that, its only number would confound representation quality with
   vocabulary alignment.
 - **Spatium is also probed, not only fine-tuned**, for the same reason.
-- **VirTues' preprocessing is replicated, not imported.** Its shipped loader
-  only reads datasets in spora's on-disk format, and converting this slide into
-  that format would fork the mask and panel handling into a second
-  implementation. `run_virtues.py` reproduces the four steps from VirTues' own
-  `MultiplexDataset._preprocess` instead — clip at the per-image 99th
-  percentile, log1p, 3×3 Gaussian blur, standardise — reading the one canonical
-  slide and mask. Two judgement calls inside that:
-  - The blur is in the *training* path but the phenotyping demo notebook
-    standardises without it. The training path wins here (preprocess at
-    inference as at pretraining); `--no-blur` runs the other reading.
-  - spora's mean/std are corpus-level and its clipping quantile is per image.
-    With one slide there is nothing else to compute either from, so both come
-    from this slide.
-- **VirTues cell tokens are pooled in one pass rather than via
-  `compute_cell_tokens`.** Same crop grid (from its own `_get_uniform_crops`),
-  same patch tokens, same pixel-overlap-weighted average — but accumulated into
-  a running sum. The shipped helper holds every crop's tokens plus a few million
-  single-token tensors in memory at once, which is tens of GB on a slide this
-  size. It also skips crops that contain no scored cell, which changes no output
-  because a crop only ever contributes to cells inside it.
+
+### VirTues reads more tissue than the others
+
+The one place this benchmark's "identical inputs" claim genuinely does not hold,
+so it is stated rather than buried.
+
+KRONOS2 and DeepCell Types read a 64 px box centred on the cell at the slide's
+native 0.37 mpp — about **24 µm** of tissue. Spatium reads no pixels at all, just
+the cell's own 18 numbers. VirTues resamples to its native 1.0 mpp and runs
+alternating spatial and marker attention over 128 px crops, so every patch token
+it emits has already attended over roughly **128 µm** — a cell's token carries its
+neighbourhood, not just the cell.
+
+That is a property of the architecture, not a protocol slip, and it cannot be
+corrected away: there is no way to shrink VirTues' receptive field without
+retraining it. The consequence for reading the table is specific — a VirTues win
+is *not* evidence of a better per-cell representation, because cell type in
+lymphoid tissue is partly predictable from neighbourhood alone (a cell inside a
+B-cell follicle is probably a B cell). It is evidence that a model with tissue
+context beats models without it, which is a different and weaker claim.
+
+Everything else stays pinned: the same cells, the same labels, the same quadrant
+folds and guard band, the same 2,000-cells-per-class budget, the same Optuna
+search over the same `C` range, the same metrics.
 
 ### Marker harmonisation
 
@@ -130,35 +131,52 @@ it decides what each model can see.
 
 | Panel marker | KRONOS2 | DeepCell Types | Spatium | VirTues |
 | --- | --- | --- | --- | --- |
-| `dapi` | ✅ | ✅ as `dsDNA` | ❌ not a protein — outside a protein-language vocabulary | ❌ not a protein — no sequence to embed |
-| `mct` (mast cell tryptase) | ✅ | ✅ as `Tryptase` | ❌ no tryptase entry | ✅ as `Q15661` (TPSAB1) |
-| `cd30` | ✅ | ❌ **no CD30/TNFRSF8 entry** | ✅ | ✅ as `P28908` (TNFRSF8) |
+| `dapi` | ✅ | ✅ as `dsDNA` | ❌ not a protein — outside a protein-language vocabulary | ❌ DNA has no sequence for ESM-2 to embed |
+| `mct` (mast cell tryptase) | ✅ | ✅ as `Tryptase` | ❌ no tryptase entry | ✅ as `TPSAB1` (Q15661) |
+| `cd30` | ✅ | ❌ **no CD30/TNFRSF8 entry** | ✅ | ✅ as `TNFRSF8` (P28908) |
 | other 15 | ✅ | ✅ | ✅ | ✅ |
-| **markers seen** | **18/18** | **17/18** | **16/18** | **17/18** |
+| **total** | **18/18** | **17/18** | **16/18** | **17/18** |
 
 KRONOS2 is marker-agnostic — it encodes whatever channels the patch carries — so
 it sees 18/18. DeepCell Types sees 17/18 but is **missing the marker that defines
 the Tumor (Hodgkin Reed-Sternberg) class in this dataset**. Spatium sees 16/18.
-VirTues sees 17/18, losing DAPI. Aliases are declared explicitly in
-[src/run_dct.py](src/run_dct.py); Spatium's own `protein_standard_mapping.tsv`
-does the gene-symbol conversion (`cd20` → `MS4A1`, `cd11b` → `ITGAM`,
-`cytokeratin` → `KRT`).
+Aliases are declared explicitly in [src/run_dct.py](src/run_dct.py); Spatium's own
+`protein_standard_mapping.tsv` does the gene-symbol conversion (`cd20` → `MS4A1`,
+`cd11b` → `ITGAM`, `cytokeratin` → `KRT`).
 
-VirTues resolves markers by **protein sequence, not by name**: each channel is
-embedded with ESM-2 (`esm2_t30_150M_UR50D`, the instance the released weights
-were trained with) from the canonical UniProt sequence of its target, and that
-vector is the only handle the model has on the channel's identity. So the panel
-has to be mapped onto accessions before anything runs
-([src/common/virtues_markers.yaml](src/common/virtues_markers.yaml)), a channel
-whose target is not a protein has nothing to embed, and there is no name-matching
-fallback. Two of the 17 need a decision rather than a lookup, and both copy
-spora's own channel table — the accessions the released weights were trained
-under — rather than being re-derived:
+**VirTues has no marker vocabulary at all.** A channel is identified only by an
+ESM-2 (`esm2_t30_150M_UR50D`, 640-d) embedding of its target protein's amino acid
+sequence — no name matching, no alias table inside the model, no fallback, no
+default statistics. That is what makes it panel-agnostic, and it is also why DAPI
+is unreachable: DNA has no amino acid sequence, so there is nothing honest to
+embed. Two aliases are declared in
+[src/common/virtues_marker_uniprot.csv](src/common/virtues_marker_uniprot.csv)
+(`cytokeratin` → P02533, `mct` → Q15661) on top of VirTues-Nextflow's shipped
+96-marker table.
 
-| Panel marker | Accession | Why it is not obvious |
-| --- | --- | --- |
-| `cd15` | `P22083` (FUT4) | CD15 is the Lewis-X carbohydrate epitope, not a protein; spora maps it to the fucosyltransferase that synthesises it |
-| `cytokeratin` | `P02533` (KRT14) | pan-CK antibodies bind many keratins; spora resolves its pan-CK channel to KRT14 |
+VirTues-Nextflow ships an optional override presenting DNA stains as Histone H3
+(P68431). It is **deliberately not used**: it asserts DAPI pixels can stand in for
+H3 pixels, and handing one encoder an extra channel on an assumption the others'
+vocabularies are not offered would put a stand-in inside a representation
+comparison. Spatium loses `dapi` for the same class of reason and is not
+compensated either, so the two are held to the same rule.
+
+Two failure modes here are silent rather than loud, which is why both are pinned:
+
+- **A wrong `mpp`** produces a complete run with normal-looking embeddings.
+  VirTues takes no `mpp` argument and does no internal resampling — its corpus is
+  stored at 1.0 µm/px, so its 8 px patch *is* an 8 µm patch and the wrapper
+  resamples to match. `protocol.MPP` is the single source of that number.
+- **The marker-embedding directory is order-sensitive.** VirTues stacks the
+  directory's `.pt` files in *sorted filename* order and derives the
+  accession → row index map from that same order, so which row a protein occupies
+  depends on which other files are present. It is built once, into one directory,
+  and then left alone; rebuilding it against a different panel would silently
+  reindex every channel with nothing erroring.
+
+The in-pipeline detector for both is masked-reconstruction QC
+(`bin/virtues_impute.py --mode qc` in VirTues-Nextflow), worth one run on this
+panel before trusting the numbers.
 
 DeepCell Types' 51-class vocabulary is mapped onto the 16 cHL classes in
 [src/common/dct_class_map.yaml](src/common/dct_class_map.yaml), by one uniform
@@ -175,18 +193,13 @@ source env/secrets.env                 # HF_TOKEN + DEEPCELL_ACCESS_TOKEN, gitig
 GPU_JOBID=<your gpuq job> ./run_all.sh # or leave unset to sbatch each GPU stage
 ```
 
-Individual stages: `./run_all.sh prep | kronos2 | dct | spatium | virtues |
-evaluate`. Stages hand off through files under `results/`, never through a live
-process, so any one can be re-run alone.
-
-VirTues splits into two: `--stage markers` (CPU, needs internet — UniProt plus
-the ESM-2 download) and `--stage tokens` (GPU, no internet beyond the
-checkpoint). `run_all.sh` runs the first locally and submits the second, because
-the GPU nodes here have no outbound network.
+Individual stages: `./run_all.sh prep | kronos2 | dct | spatium | evaluate`.
+Stages hand off through files under `results/`, never through a live process, so
+any one can be re-run alone.
 
 ### Environments
 
-Four, because the models pin incompatible torch stacks. Built by
+Three, because the models pin incompatible torch stacks. Built by
 `env/build_*.sh` into `/vast/scratch/users/mckay.m/condaenvs`.
 
 | Env | For | Stack |
@@ -194,7 +207,6 @@ Four, because the models pin incompatible torch stacks. Built by
 | `sp-coral` | prep, KRONOS2, evaluation | torch 2.6.0+cu124, transformers 4.56.0, timm 1.0.19 — pinned exactly; KRONOS2 embeddings are only bit-exact to the published gold standard on this stack, at `--batch-size 16` |
 | `sp-dct` | DeepCell Types | torch 2.13+cu130 |
 | `sp-spatium` | Spatium | torch 2.6.0+cu124, pytorch-lightning, zarr <3 |
-| `sp-virtues` | VirTues | python 3.12, torch+cu126, flash-attn, fair-esm — VirTues' own `setup.sh` choices |
 
 ### Gotchas worth knowing
 
@@ -212,40 +224,33 @@ Four, because the models pin incompatible torch stacks. Built by
 - **Spatium needs per-marker z-scoring.** Only the rank *order* of markers
   survives tokenisation, so on raw intensities the ranking is dominated by which
   antibodies are globally bright — nearly identical for every cell.
-- **flash-attn is not optional for VirTues, and it is the slow build.** Its
-  attention blocks import `flash_attn.flash_attn_interface` at module scope, so
-  the package will not import without it, and it is CUDA-only — the token stage
-  cannot fall back to CPU. `pip install flash-attn --no-build-isolation`
-  compiles kernels; budget 30-60 min unless a matching wheel exists.
-- **`virtues-sp32` is CC BY-NC 4.0** — academic use only. `virtues-sp31` (MIT,
-  trained on 31 of the 32 datasets) is the commercial-use alternative; swap
-  `HF_WEIGHTS` in [src/run_virtues.py](src/run_virtues.py).
-- **VirTues' marker embedding directory is read wholesale.** Its loader takes
-  every `.pt` in the directory and orders them by filename, so a stale embedding
-  left over from a different panel silently shifts every marker index by one.
-  `run_virtues.py` asserts the set on disk matches the panel exactly.
+- **`VirTues-Nextflow`'s `standardise()` is patched locally, outside this
+  repo's git.** It's an external clone at
+  `/vast/scratch/users/mckay.m/VirTues-Nextflow` (its own git remote,
+  `mikemcka/VirTues-Nextflow`), not vendored here. The patch adds a `tissue`
+  argument so the clip percentile and log-scale mean/std are computed over
+  tissue-masked pixels only, per the VirTues paper's Methods — the unpatched
+  version used the whole image (67.3% background on this slide). Re-cloning or
+  updating that repo will silently drop the fix; see RESULTS.md's Headline
+  section for what it did and didn't change.
 
 ## Layout
 
 ```
 src/
-  common/protocol.py         the shared contract: classes, panel, folds, probe settings,
-                             and the one definition of which slide planes are the panel
-  common/probe.py            scoring harness (wraps CORAL's own probe helpers)
-  common/dct_class_map.yaml  DeepCell Types vocabulary -> cHL classes
-  common/virtues_markers.yaml panel -> UniProt accessions for VirTues
-  prep_coral.py              ingest -> mask/label import -> patches -> canonical cell table
-  run_kronos2.py             KRONOS2 per-cell CLS embeddings
-  run_dct.py                 DeepCell Types zero-shot + frozen CLS embeddings
-  run_spatium.py             rank tokens -> frozen embeddings + few-shot fine-tune
-  spatium_shim.py            makes Spatium's bare source tree importable
-  run_virtues.py             ESM-2 marker embeddings -> whole-slide sweep -> cell tokens
-  evaluate.py                scores everything, writes tables and figures
+  common/protocol.py        the shared contract: classes, panel, folds, probe settings
+  common/probe.py           scoring harness (wraps CORAL's own probe helpers)
+  common/dct_class_map.yaml DeepCell Types vocabulary -> cHL classes
+  prep_coral.py             ingest -> mask/label import -> patches -> canonical cell table
+  run_kronos2.py            KRONOS2 per-cell CLS embeddings
+  run_dct.py                DeepCell Types zero-shot + frozen CLS embeddings
+  run_spatium.py            rank tokens -> frozen embeddings + few-shot fine-tune
+  spatium_shim.py           makes Spatium's bare source tree importable
+  evaluate.py               scores everything, writes tables and figures
 results/
   cells.parquet             THE canonical cell list — every model aligns to it by cell_id
   features/*.npz            one per encoder: cell_id + features
   predictions/              native-mode calls
-  virtues/                  ESM-2 marker embeddings, FASTAs, VirTues checkpoint
   figures/                  probe summary, per-class F1, confusion, spatial errors
 RESULTS.md                  the findings
 ```

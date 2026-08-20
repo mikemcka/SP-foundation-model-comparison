@@ -13,9 +13,6 @@ deepcell-types/
 Spatium/
 virtues/
 
-# Papers read alongside the code, not code (the VirTues PDF alone is 92 MB).
-*.pdf
-
 # The 3.4 GB Zenodo download and everything derived from it (~14 GB unpacked).
 CORAL/tutorials/example-data/
 data/
@@ -26,7 +23,13 @@ work/
 results/features/
 results/probe_cache/
 results/spatium/
+# VirTues' working directory: a 2.2 GB panel OME-TIFF, the ESM-2 marker
+# embeddings, the checkpoint and a ~300 MB token parquet. All regenerable.
 results/virtues/
+# VirTues-Nextflow's marker scripts write these relative to cwd, not under
+# results/ — the downloaded FASTAs and the ESM-2 sequence embeddings.
+esm_work/
+fastas/
 results/logs/
 results/predictions/*.npz
 results/cells.parquet
